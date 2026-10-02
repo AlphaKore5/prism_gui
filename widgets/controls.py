@@ -1396,6 +1396,28 @@ class PlainPasteTextEdit(QTextEdit):
             self.insertPlainText(source.text())
 
 
+class SubmitTextEdit(PlainPasteTextEdit):
+    """The task composer: Enter sends it, like the button beside it does.
+
+    A multi-line box swallows Enter as a new line, so the only way to go on
+    was the mouse. Here Enter (the keypad one too, and Ctrl+Enter) emits
+    `submitted`; Shift+Enter still breaks the line. An input method that is
+    composing (Gujarati, Hindi) keeps its own Enter — Qt hands that to the
+    method, not to keyPressEvent — so confirming a word never sends the task.
+    """
+
+    submitted = Signal()
+
+    def keyPressEvent(self, event):
+        if (event.key() in (Qt.Key_Return, Qt.Key_Enter)
+                and not self.isReadOnly()      # the plan's recap lets Enter bubble
+                and not (event.modifiers() & (Qt.ShiftModifier | Qt.AltModifier))):
+            event.accept()
+            self.submitted.emit()
+            return
+        super().keyPressEvent(event)
+
+
 class SearchField(QLineEdit):
     """The one search box. A capsule QLineEdit with a leading glyph and a
     clear button.

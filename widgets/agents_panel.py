@@ -923,7 +923,8 @@ class AgentsPanel(QWidget):
     def set_run_enabled(self, enabled: bool):
         self.run_btn.setEnabled(enabled)
         self.run_btn.setToolTip(
-            i18n.t("Runs every step still switched on.") if enabled else
+            i18n.t("Runs every step still switched on.") + " "
+            + i18n.t("Press Enter to start.") if enabled else
             i18n.t("Make a plan first — this fills in once Prism picks the "
                    "steps."))
         # Discard only exists while there are steps to discard.

@@ -371,8 +371,9 @@ class InputPanel(Card):
         # A drawn, focusable well rather than a line of placeholder text on a
         # white card. The complaint the redesign starts from is that the most
         # important input in the product did not look like an input at all.
-        self.text = C.PlainPasteTextEdit()
+        self.text = C.SubmitTextEdit()
         self.text.setObjectName("taskEdit")
+        self.text.submitted.connect(self._submit_from_keyboard)
         self.text.setFrameShape(QTextEdit.NoFrame)
         self.text.setPlaceholderText(i18n.t(
             "Describe the job in your own words — what you want, who it is "
@@ -456,6 +457,8 @@ class InputPanel(Card):
         self.route_btn = QPushButton(i18n.t("Make a plan"))
         self.route_btn.setObjectName("primaryBtn")
         self.route_btn.setCursor(Qt.PointingHandCursor)
+        self.route_btn.setToolTip(i18n.t(
+            "Press Enter to make the plan. Shift+Enter starts a new line."))
         self.route_btn.setMinimumHeight(C.MIN_TARGET + 10)
         self.route_btn.clicked.connect(self._on_route_btn_clicked)
         row.addWidget(self.route_btn)
@@ -836,6 +839,13 @@ class InputPanel(Card):
     def _pulse_mic(self):
         pass
 
+    def _submit_from_keyboard(self):
+        """Enter in the composer: the same as pressing Make a plan, and only
+        when that button would work. While busy the button reads Cancel, and a
+        stray Enter must never mean that."""
+        if not self._busy and self.route_btn.isEnabled():
+            self.route_btn.click()
+
     def _on_route_btn_clicked(self):
         """The same button does both jobs, like mic_btn's Speak/Stop — while
         busy it reads "Cancel" and means that instead of "Make a plan"."""
@@ -848,6 +858,10 @@ class InputPanel(Card):
         self._busy = busy
         self.route_btn.setText(
             i18n.t('Cancel') if busy else i18n.t('Make a plan'))
+        # The Enter hint is about making the plan; while the button reads
+        # Cancel it would be wrong.
+        self.route_btn.setToolTip("" if busy else i18n.t(
+            "Press Enter to make the plan. Shift+Enter starts a new line."))
         if busy:
             self.set_state("routing")
         # Enabled either way: "routing" disables it in set_state (nothing to

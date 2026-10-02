@@ -19,7 +19,8 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QMessageBox, QFrame,
     QFileDialog, QDialog, QLabel, QScrollArea, QStackedWidget, QPushButton,
     QMenu, QApplication, QProgressDialog, QGraphicsScene, QGraphicsBlurEffect,
-    QGraphicsOpacityEffect,
+    QGraphicsOpacityEffect, QAbstractButton, QAbstractItemView, QAbstractSpinBox,
+    QComboBox, QLineEdit, QPlainTextEdit, QTextEdit,
 )
 
 import app_meta
@@ -3922,6 +3923,52 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         if hasattr(self, "lumi_overlay"):
             self.lumi_overlay.reposition()
+
+    def keyPressEvent(self, event):
+        """Enter does what the screen's main button does.
+
+        The task flow could only be moved on with the mouse: "Make a plan" and
+        "Start the work" were buttons and nothing else. A key the focused widget
+        did not use travels up to here, so this only ever sees an Enter that
+        nobody typed into a box or pressed on a button. See _enter_pressed.
+        """
+        if (event.key() in (Qt.Key_Return, Qt.Key_Enter)
+                and not event.isAutoRepeat()        # holding Enter must not repeat it
+                and not (event.modifiers() & ~Qt.KeypadModifier)
+                and self._enter_pressed()):
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _enter_pressed(self) -> bool:
+        """Act on a bare Enter on the New task screen; True when it did.
+
+        Text boxes, drop-downs and lists keep their own Enter. A focused button
+        is pressed, whichever it is, so Enter on Discard never starts the run.
+        With nothing of the kind focused, Enter is the screen's next step: Start
+        the work once there is a plan, Make a plan before that.
+        """
+        if self.screens.currentIndex() != WORKBENCH:
+            return False
+        focus = QApplication.focusWidget()
+        if isinstance(focus, (QLineEdit, QTextEdit, QPlainTextEdit, QComboBox,
+                              QAbstractItemView, QAbstractSpinBox)):
+            return False
+        if (isinstance(focus, QAbstractButton) and focus.isEnabled()
+                and focus.isVisible()
+                and focus not in (self.agents_panel.run_btn, self.input_panel.route_btn)):
+            focus.click()
+            return True
+        run = self.agents_panel.run_btn
+        if run.isVisible() and run.isEnabled():
+            run.click()
+            return True
+        route = self.input_panel.route_btn
+        if route.isVisible() and route.isEnabled():
+            # Cancel is the same button while planning; Enter must not mean that.
+            self.input_panel._submit_from_keyboard()
+            return True
+        return False
 
     def closeEvent(self, event):
         self._stop_reel_editor()

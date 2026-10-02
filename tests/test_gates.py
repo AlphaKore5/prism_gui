@@ -992,3 +992,113 @@ class UnpromptedStepGate(GateTest):
         asked, worker = self._run(win, QMessageBox.Yes)
         self.assertNotIn("leads", worker.call_args.kwargs["skip_stages"])
 
+
+
+class EnterMovesTheTaskOn(GateTest):
+    """Enter does what the New task screen's main button does.
+
+    "Make a plan" and "Start the work" could only be pressed with the mouse.
+    A key nothing focused used reaches the window, which now acts on it. The
+    cases that matter are the ones where it must NOT: typing in a box, a focused
+    Discard button, a held-down key, and any screen but New task.
+    """
+
+    def _press(self, win, key=None, auto_repeat=False):
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+        event = QKeyEvent(QEvent.KeyPress, key or Qt.Key_Return, Qt.NoModifier,
+                          "\r", auto_repeat, 1)
+        win.keyPressEvent(event)
+        return event.isAccepted()
+
+    def _planned_window(self):
+        """A window on New task with a plan on the bench and Start live."""
+        win = self._window()
+        win.show()
+        self.addCleanup(win.close)
+        win._show_screen("workbench")
+        win.agents_panel.set_run_enabled(True)
+        self.starts, self.discards = [], []
+        win.agents_panel.run_btn.clicked.connect(lambda: self.starts.append(1))
+        win.agents_panel.discard_btn.clicked.connect(lambda: self.discards.append(1))
+        return win
+
+    def _focused(self, widget):
+        import main_window
+        patcher = mock.patch.object(main_window.QApplication, "focusWidget",
+                                    return_value=widget)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_enter_starts_the_work_once_there_is_a_plan(self):
+        win = self._planned_window()
+        self.assertTrue(win.agents_panel.run_btn.isVisible())
+        self.assertTrue(self._press(win))
+        self.assertEqual((self.starts, self.discards), ([1], []))
+
+    def test_enter_on_a_focused_discard_button_discards_and_never_starts(self):
+        from PySide6.QtWidgets import QMessageBox
+        win = self._planned_window()
+        self._focused(win.agents_panel.discard_btn)
+        asked = []
+        # Discard asks first; answering Cancel keeps the test off a real modal.
+        with mock.patch.object(QMessageBox, "question",
+                               side_effect=lambda *a, **k: asked.append(a[1]) or QMessageBox.Cancel):
+            self.assertTrue(self._press(win))
+        self.assertEqual((self.starts, self.discards), ([], [1]))
+        self.assertEqual(asked, ["Discard these steps"])
+
+    def test_enter_inside_a_text_box_is_left_to_the_box(self):
+        win = self._planned_window()
+        self._focused(win.input_panel.text)
+        self.assertFalse(self._press(win))
+        self.assertEqual(self.starts, [])
+
+    def test_a_held_down_enter_does_not_repeat(self):
+        win = self._planned_window()
+        self.assertFalse(self._press(win, auto_repeat=True))
+        self.assertEqual(self.starts, [])
+
+    def test_a_modified_enter_is_not_ours(self):
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+        win = self._planned_window()
+        win.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Return,
+                                    Qt.ControlModifier, "\r"))
+        self.assertEqual(self.starts, [])
+
+    def test_other_keys_do_nothing(self):
+        from PySide6.QtCore import Qt
+        win = self._planned_window()
+        self._press(win, key=Qt.Key_Space)
+        self.assertEqual(self.starts, [])
+
+    def test_enter_on_another_screen_starts_nothing(self):
+        win = self._planned_window()
+        win._show_screen("home")
+        self.assertFalse(self._press(win))
+        self.assertEqual(self.starts, [])
+
+    def test_without_a_plan_enter_makes_the_plan_from_the_composer(self):
+        win = self._window()
+        win.show()
+        self.addCleanup(win.close)
+        win._show_screen("workbench")
+        win.input_panel.text.setPlainText("Summarise this tender")
+        planned = []
+        win.input_panel.route_clicked.connect(planned.append)
+        self.assertTrue(win.input_panel.route_btn.isEnabled())
+        self.assertTrue(self._press(win))
+        self.assertEqual(planned, ["Summarise this tender"])
+
+    def test_enter_never_cancels_a_plan_in_progress(self):
+        win = self._window()
+        win.show()
+        self.addCleanup(win.close)
+        win._show_screen("workbench")
+        win.input_panel.text.setPlainText("Summarise this tender")
+        win.input_panel.set_busy(True)
+        cancelled = []
+        win.input_panel.cancel_route_clicked.connect(lambda: cancelled.append(1))
+        self._press(win)
+        self.assertEqual(cancelled, [])
