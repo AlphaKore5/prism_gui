@@ -53,6 +53,7 @@ class _Driver:
         self.script = script          # list of {selector: [texts]}
         self.i = -1
         self.executed = []
+        self.stop_button = False      # a Stop button the busy selector misses
 
     def find_elements(self, _by, sel):
         frame = self.script[min(self.i, len(self.script) - 1)]
@@ -65,6 +66,8 @@ class _Driver:
         # image had arrived and settle the wait early.
         if "naturalWidth" in js:
             return False
+        if "querySelectorAll('button')" in js:
+            return self.stop_button
         return True
 
 
@@ -177,6 +180,28 @@ class AnAnswerAlreadyOnThePageIsNotTheNewReply(unittest.TestCase):
                                            stable_for=25, min_wait=35)
         self.assertFalse(settled)
         self.assertGreaterEqual(took, 100)
+
+
+class AStopButtonTheSelectorMissesStillCounts(unittest.TestCase):
+    """2026-10-05: ChatGPT showed "Analyzing" with its Stop square up, the
+    configured busy selector matched nothing, and the wait settled after 5s on
+    the 222-char preamble -- Prism moved on to Claude. The generic Stop-button
+    check must back the selector up, not be replaced by it."""
+
+    FRAMES = ([{TURN: ["x"], RESP: ["a" * 200]}]
+              + [{TURN: ["x"], RESP: ["a" * 222]}] * 60)
+
+    def test_a_visible_stop_button_keeps_the_wait_open(self):
+        d = _Driver(self.FRAMES)
+        d.stop_button = True
+        took, settled = _wait(d, self.FRAMES, cap=150)
+        self.assertFalse(settled)
+        self.assertGreaterEqual(took, 150)
+
+    def test_without_one_the_same_text_settles(self):
+        d = _Driver(self.FRAMES)
+        took, settled = _wait(d, self.FRAMES, cap=300)
+        self.assertTrue(settled)
 
 
 class RegenerateOnce(unittest.TestCase):
