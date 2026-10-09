@@ -10,6 +10,46 @@ Tests: **1966 passing** (6 skipped, 8 Sep 2026 after Round 16 landed on main —
 
 ---
 
+# 1.6.1 — release roll-up (9 Oct 2026)
+
+What this version carries on top of 1.6.0. The review findings are in
+`docs/handover/HANDOVER-2026-10-02.md`.
+
+- **From the 1 Oct app review:** a partial e-mail send no longer vanishes after a
+  reconnect failure; closing the app stops the Leads workers; cancelling the run
+  confirmation no longer leaves auto-run armed; "Not now" on the update banner
+  returns after 24 hours instead of hiding it for good (Settings keeps the card);
+  Leads outreach honours the send pace and a daily limit counted across runs, and
+  the suppression list is per sender.
+- **Found by running the real app:** unsupported files (`.zip`, `.doc`) opened
+  nothing instead of the "open externally" dialog (live in 1.6.0); Discard kept
+  attached files in memory only; the Leads Removed window's Restore crashed; the
+  delete-contact box read the name as markup; Home's demo video showed a raw file
+  name; page subtitles and header buttons were cut off; the Appearance wallpaper
+  tiles were unstyled; the AI tools card column was clipped; the Email account
+  dialog's field text was clipped.
+- **Lumi:** the launcher no longer covers Discard, Start the work, the Inquiry
+  Back button or the last row of a page, and now also leaves the setup wizard's
+  Next button clear (its pages scroll on a short window instead of clipping).
+  Lumi answers the Chrome-connection and "other browsers" questions and no longer
+  names Settings buttons that do not exist.
+- **Look:** every role's palette is pinned, so the app stays light on any desktop
+  theme.
+- **Engine:** ChatGPT's new composer and reply markup, and a busy check that
+  cannot return the previous answer.
+- **Open login tabs** opens on a worker and always says what happened; a Chrome
+  that holds a file open no longer fails the profile copy, which is why the button
+  did nothing on a fresh Windows 10 install.
+- **Inquiry:** a double-click on any row opens the mail in full (body and the
+  names of what was attached), and every row is colour-graded (New green, Quoted
+  grey).
+- **Release tooling:** `devtools/release_all.py` releases Windows, then Linux, then
+  macOS, and takes `--only <platform>`.
+
+Still open: §4 of the handover.
+
+---
+
 # 1.6.0 — release roll-up (1 Oct 2026)
 
 What this version carries on top of 1.5.8: Rounds 37-40 and 47-52 from the
