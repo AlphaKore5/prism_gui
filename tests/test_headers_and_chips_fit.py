@@ -94,6 +94,23 @@ class RoomForTheLumiLauncher(unittest.TestCase):
                                     theme.PAGE_PAD + theme.LAUNCHER_CLEARANCE)
             panel.deleteLater()
 
+    def test_the_setup_wizard_leaves_that_room_under_next(self):
+        """The wizard's pinned Back/Next row sat under the pill, so Next (and
+        "Start using Prism") was covered on first run (seen in the real window,
+        9 Oct 2026). Its pages scroll so that room does not clip them on a short
+        laptop screen."""
+        import theme
+        from PySide6.QtWidgets import QScrollArea
+        from widgets.wizard_panel import WizardPanel
+        panel = WizardPanel({})
+        root = panel.layout()
+        footer = root.itemAt(root.count() - 1).layout()
+        self.assertGreaterEqual(footer.contentsMargins().bottom(),
+                                theme.PAGE_PAD + theme.LAUNCHER_CLEARANCE)
+        for i in range(panel.stack.count()):
+            self.assertIsInstance(panel.stack.widget(i), QScrollArea)
+        panel.deleteLater()
+
 
 class EmailSetupFieldsAreTallEnough(unittest.TestCase):
     """The Email account dialog clipped the bottom of every field's text

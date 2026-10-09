@@ -18,10 +18,11 @@ screen in main_window.py's stack (Home, Settings, ...) already takes.
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QUrl, Signal
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
-    QHBoxLayout, QLabel, QLineEdit, QStackedWidget, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QLineEdit, QScrollArea, QStackedWidget, QVBoxLayout,
+    QWidget,
 )
 
 import core_bridge as CB
@@ -60,10 +61,21 @@ class WizardPanel(QWidget):
         self._page_agents = self._build_agents_page()
         self._page_login = self._build_login_page()
         for page in (self._page_key, self._page_agents, self._page_login):
-            self.stack.addWidget(page)
+            self.stack.addWidget(self._scrolling(page))
 
         root.addLayout(self._footer())
         self._go_to(KEY)
+
+    @staticmethod
+    def _scrolling(page: QWidget) -> QScrollArea:
+        """The footer now leaves room for the Lumi launcher, which takes height
+        from the page — on a short window the page scrolls instead of clipping."""
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QScrollArea.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        area.setWidget(page)
+        return area
 
     def start(self, cfg: dict):
         """Called once, by MainWindow._first_run(), each time this screen is
@@ -267,28 +279,20 @@ class WizardPanel(QWidget):
         return card
 
     def _open_login_tabs(self):
-        agents = self._agents_picker.current_agents()
-        ok, err = CB.automation_available()
-        if not ok:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, i18n.t("Login tabs"),
-                                i18n.t("Automation deps not available: {error}")
-                                .format(error=err))
-            return
-        automation = CB.get_automation()
-        urls = CB.login_tab_urls(agents)
-        automation.open_login_tabs(urls)
         from PySide6.QtWidgets import QMessageBox
-        QMessageBox.information(
-            self, i18n.t("Login tabs"),
-            i18n.t("Opened {n} tab(s) in Chrome — sign in, then come back "
-                   "here.").format(n=len(urls)))
+        from widgets.login_tabs import open_login_tabs
+        open_login_tabs(self, self._agents_picker.current_agents(),
+                        on_opened=lambda n: QMessageBox.information(
+                            self, i18n.t("Login tabs"),
+                            i18n.t("Opened {n} tab(s) in Chrome — sign in, then "
+                                   "come back here.").format(n=n)))
 
     # ── footer: Back / Next / Start ──────────────────────────────────────────
     def _footer(self) -> QHBoxLayout:
         row = QHBoxLayout()
+        # The Ask-Lumi pill sits bottom-right and used to cover Next.
         row.setContentsMargins(theme.PAGE_PAD, theme.SPACE_4,
-                               theme.PAGE_PAD, theme.SPACE_6)
+                               theme.PAGE_PAD, theme.PAGE_PAD + theme.LAUNCHER_CLEARANCE)
         row.setSpacing(theme.SPACE_3)
         self.back_btn = C.button(i18n.t("Back"), "secondary",
                                  on_click=self._go_back)
