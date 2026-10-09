@@ -44,7 +44,8 @@ from PySide6.QtWidgets import (
     QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
     QLineEdit,
     QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar,
-    QPushButton, QRadioButton, QSizePolicy, QStackedWidget, QTabBar,
+    QPushButton, QRadioButton, QSizePolicy, QStackedWidget, QStyle,
+    QStyledItemDelegate, QTabBar,
     QTableWidget, QTableWidgetItem, QTabWidget, QTextEdit, QVBoxLayout,
     QWidget,
 )
@@ -189,8 +190,14 @@ CATEGORY_COLOURS = {
 # The sales pipeline, in order, coloured by whose move it is:
 # arrived (live) -> quoted (theirs) -> chased (theirs) -> haggling (YOURS) ->
 # won / lost.
+#
+# New is green rather than merely informational, on the owner's own
+# instruction: a fresh inquiry is a chance sitting there, read with the same
+# weight as money already won, while a Quoted one is parked grey — sent,
+# nothing to do until they answer. His words were "grey coloured" and "the
+# pending quote in green"; this is his colour, not a tone Prism chose alone.
 STATUS_COLOURS = {
-    "New":            _INFO,
+    "New":            _OK,
     "Quoted":         _QUIET,
     "Following up":   _NEUTRAL,
     "Negotiating":    _WARN,
@@ -713,17 +720,109 @@ class _HistoryDialog(PrismDialog):
         return card
 
 
+class _ReadMailDialog(PrismDialog):
+    """One mail, read in full — the owner's own words were "there is only
+    an option for subject, no body" and "I should be able to see the mail
+    ... with Subject with Body, with image". Images are not here yet (an
+    attachment is only ever a filename on file, see _StoredMessage); this
+    is the subject, the body, and what was attached, in one window, opened
+    the way every table on this screen now opens one — a double-click."""
+
+    def __init__(self, message, parent=None):
+        subject = (getattr(message, "subject", "") or "").strip() \
+            or i18n.t("(no subject)")
+        super().__init__(subject, "", icon="mail", parent=parent,
+                         closable=False, scrollable=True)
+        self.setWindowTitle(subject)
+        self.resize(640, 560)
+        self.setMinimumSize(420, 320)
+
+        who = getattr(message, "from_name", "") or ""
+        addr = getattr(message, "from_addr", "") or ""
+        meta = f"{who} <{addr}>" if who and addr and who != addr else (who or addr)
+        when = _dmy(getattr(message, "date", "") or "")
+        line = " · ".join(p for p in (meta, when) if p)
+        if line:
+            self.body.addWidget(C.label(line, level="SUPPORT", wrap=True))
+
+        card = C.Card()
+        col = card.body(margins=(16, 14, 16, 14), spacing=theme.SPACE_2)
+        text = QLabel((getattr(message, "body", "") or "").strip()
+                      or i18n.t("(no body)"))
+        text.setWordWrap(True)
+        text.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        col.addWidget(text)
+        self.body.addWidget(card)
+
+        names = list(getattr(message, "attachment_names", None) or [])
+        if names:
+            self.body.addWidget(C.label(
+                i18n.t("Attached: {names}").replace("{names}", ", ".join(names)),
+                level="META", wrap=True))
+        self.body.addStretch(1)
+        self.footer.set_primary(
+            self.button(i18n.t("Close"), "primary", on_click=self.accept))
+
+
+class _TintedCellDelegate(QStyledItemDelegate):
+    """Paints a cell's own background and text colour directly, instead of
+    leaving it to the default delegate.
+
+    #inquiryWorkspace's stylesheet styles QTableWidget#inquiryTable::item
+    (padding and a border, on every one of the six tabs built by
+    _make_table) — and the moment a stylesheet touches ::item at all, Qt
+    stops consulting Qt.BackgroundRole/Qt.ForegroundRole on its own. A cell
+    tinted with setBackground()/setForeground() then quietly paints plain
+    white, nothing raised, no test catching it unless the test looks at an
+    actual pixel. tests/test_paint_colours.py already found and fixed this
+    exact failure for the Leads pills and the progress tracks; this is the
+    same fix for this file's tables, by the same method register_table.py's
+    StatusPillDelegate already uses — paint it yourself, so the stylesheet
+    is never asked to.
+
+    A cell that was never tinted (no Qt.BackgroundRole set) falls straight
+    through to the normal, QSS-styled painting — untouched.
+    """
+
+    def paint(self, painter, option, index):
+        bg = index.data(Qt.BackgroundRole)
+        if bg is None:
+            super().paint(painter, option, index)
+            return
+        painter.save()
+        painter.fillRect(option.rect, bg)
+        if option.state & QStyle.State_Selected:
+            # The same dark overlay the stylesheet uses for every other
+            # table's selection — 0.06 alpha, i.e. 15/255.
+            painter.fillRect(option.rect, QColor(0, 0, 0, 15))
+        text = str(index.data(Qt.DisplayRole) or "")
+        if text:
+            fg = index.data(Qt.ForegroundRole)
+            painter.setPen(fg.color() if fg is not None else QColor(theme.TEXT))
+            rect = option.rect.adjusted(10, 0, -10, 0)
+            elided = option.fontMetrics.elidedText(text, Qt.ElideRight,
+                                                   rect.width())
+            painter.drawText(rect, Qt.AlignLeft | Qt.AlignVCenter, elided)
+        painter.restore()
 
 
 def paint(item: QTableWidgetItem, colours: dict, key: str) -> QTableWidgetItem:
     """Tint one cell from one of the tables above. Unknown keys stay plain.
 
+    Goes through theme.qcolor(), not a bare QColor(pair[0]) — the OK/WARN/
+    ERR/INFO tints are `rgba(...)` CSS strings, which QColor's own string
+    constructor cannot parse: it returns silently-invalid and paints solid
+    black with nothing raised (see tests/test_paint_colours.py, which caught
+    exactly this for the Leads pills and progress tracks). Only _NEUTRAL and
+    _QUIET happen to be plain hex, which is why that failure mode never
+    showed up in a table painted only with those two.
+
     Returns the item so it reads as one line at the call site.
     """
     pair = colours.get((key or "").strip())
     if pair:
-        item.setBackground(QColor(pair[0]))
-        item.setForeground(QColor(pair[1]))
+        item.setBackground(theme.qcolor(pair[0]))
+        item.setForeground(theme.qcolor(pair[1]))
     return item
 
 
@@ -743,12 +842,19 @@ def _iso_date(when) -> str:
 
 
 def _arrived_entry(message, verdict) -> dict:
-    """What one arrived-mail row needs to redraw itself from disk."""
+    """What one arrived-mail row needs to redraw itself from disk — plus
+    what "open the mail" needs to show it in full, the same two fields
+    _worklist_entry() already keeps for a reply or an order. Every piece of
+    mail Prism sorts gets this now, not only the ones that became a reply
+    or a PO — previously this read "only a subject, no body" for anything
+    landing in All mail, which was the owner's own words for the gap."""
     return {
         "message_id": message.message_id or "",
         "from_name": message.from_name,
         "from_addr": message.from_addr,
         "subject": message.subject,
+        "body": (message.body or "")[:4000],
+        "attachment_names": list(message.attachment_names or []),
         "date": _iso_date(message.date),
         "category": verdict.category,
         "reason": verdict.reason,
@@ -779,9 +885,10 @@ def _worklist_entry(item) -> dict:
 
 
 class _StoredMessage:
-    """Enough of core.inbox.Message to satisfy _show_reply(), _review_po()
-    and _po_file() for a reply or order read back from the worklist file,
-    where the real Message from the check that found it no longer exists."""
+    """Enough of core.inbox.Message to satisfy _show_reply(), _review_po(),
+    _po_file() and _ReadMailDialog for a reply, order or arrived-mail row
+    read back from the worklist file, where the real Message from the
+    check that found it no longer exists."""
 
     def __init__(self, entry: dict):
         self.from_name = entry.get("from_name", "")
@@ -789,6 +896,9 @@ class _StoredMessage:
         self.subject = entry.get("subject", "")
         self.body = entry.get("body", "")
         self.attachment_names = list(entry.get("attachment_names") or [])
+        # ISO (YYYY-MM-DD) — both _worklist_entry() and _arrived_entry()
+        # write it that way; _ReadMailDialog is the only reader, via _dmy().
+        self.date = entry.get("date", "")
 
     def snippet(self, limit: int = 1500) -> str:
         text = (self.body or "").strip()
@@ -1261,6 +1371,10 @@ class InquiryDialog(QWidget):
         table.setSelectionMode(QAbstractItemView.SingleSelection)
         table.setAlternatingRowColors(True)
         table.setWordWrap(False)
+        # Without this, every tint painted below (STATUS_COLOURS,
+        # CATEGORY_COLOURS, INTENT_COLOURS — see _TintedCellDelegate for
+        # why) is silently invisible under the app's real stylesheet.
+        table.setItemDelegate(_TintedCellDelegate(table))
         head = table.horizontalHeader()
         for column in (stretch if isinstance(stretch, (tuple, list)) else (stretch,)):
             head.setSectionResizeMode(column, QHeaderView.Stretch)
@@ -1315,6 +1429,8 @@ class InquiryDialog(QWidget):
         page.panel.extra.addLayout(row)
         self.arrived.currentCellChanged.connect(
             lambda *_: self._sync_panel("arrived"))
+        self.arrived.cellDoubleClicked.connect(
+            lambda *_: self._open_mail("arrived"))
         return page
 
     # ── tab 1: to quote ───────────────────────────────────────────────────
@@ -1331,6 +1447,8 @@ class InquiryDialog(QWidget):
         self._add_row_actions(page.panel)
         self.to_quote_table.currentCellChanged.connect(
             lambda *_: self._sync_panel("to_quote"))
+        self.to_quote_table.cellDoubleClicked.connect(
+            lambda *_: self._open_mail("to_quote"))
         return page
 
     # ── tab 5: every inquiry ──────────────────────────────────────────────
@@ -1363,6 +1481,8 @@ class InquiryDialog(QWidget):
         self._add_row_actions(page.panel)
         self.register_table.currentCellChanged.connect(
             lambda *_: self._sync_panel("register"))
+        self.register_table.cellDoubleClicked.connect(
+            lambda *_: self._open_mail("register"))
         return page
 
     # ── tab 3: they answered ──────────────────────────────────────────────
@@ -1421,6 +1541,8 @@ class InquiryDialog(QWidget):
                          self._show_history)
         self.replies_table.currentCellChanged.connect(
             lambda *_: self._sync_panel("replies"))
+        self.replies_table.cellDoubleClicked.connect(
+            lambda *_: self._open_mail("replies"))
         return page
 
     def _fill_replies(self, result):
@@ -1463,8 +1585,12 @@ class InquiryDialog(QWidget):
                      item.message.subject,
                      i18n.t(INTENT_LABELS.get(item.intent, item.intent)),
                      would or i18n.t("nothing — needs your eye")]
+            base = STATUS_COLOURS.get(would) if would else None
             for column, value in enumerate(cells):
                 cell = QTableWidgetItem(str(value))
+                if base:
+                    cell.setBackground(theme.qcolor(base[0]))
+                    cell.setForeground(theme.qcolor(base[1]))
                 if column == 3:
                     paint(cell, INTENT_COLOURS, item.intent)
                 elif column == 4 and would:
@@ -1567,6 +1693,8 @@ class InquiryDialog(QWidget):
         self.remind_btn = page.panel.buttons["remind"]
         self.followups.currentCellChanged.connect(
             lambda *_: self._sync_panel("waiting"))
+        self.followups.cellDoubleClicked.connect(
+            lambda *_: self._open_mail("waiting"))
         return page
 
     # ── tab 4: the order came ─────────────────────────────────────────────
@@ -1605,6 +1733,8 @@ class InquiryDialog(QWidget):
                          self._show_history)
         self.orders_table.currentCellChanged.connect(
             lambda *_: self._sync_panel("orders"))
+        self.orders_table.cellDoubleClicked.connect(
+            lambda *_: self._open_mail("orders"))
         return page
 
     def _fill_orders(self, result):
@@ -1652,9 +1782,15 @@ class InquiryDialog(QWidget):
                      or item.message.from_addr,
                      item.message.subject,
                      i18n.t(item.note) if item.note else ""]
+            # A PO that already arrived is money, same green as Converted.
+            # One accepted by hand with no PO yet is the one row here that
+            # still needs the owner to act — amber, same as Negotiating.
+            pair = _WARN if isinstance(item, _RegisterOnlyItem) else _OK
             for column, value in enumerate(cells):
-                self.orders_table.setItem(index, column,
-                                          QTableWidgetItem(str(value)))
+                cell = QTableWidgetItem(str(value))
+                cell.setBackground(theme.qcolor(pair[0]))
+                cell.setForeground(theme.qcolor(pair[1]))
+                self.orders_table.setItem(index, column, cell)
         if items:
             self.orders_table.setCurrentCell(0, 0)
         self._refresh_counts()
@@ -2432,19 +2568,20 @@ class InquiryDialog(QWidget):
                              r.get("subject"))]
         self.arrived.setRowCount(len(rows))
         for index, entry in enumerate(rows):
-            who = entry.get("from_name") or entry.get("from_addr", "")
-            self.arrived.setItem(index, 0, QTableWidgetItem(who))
-            self.arrived.setItem(index, 1,
-                                 QTableWidgetItem(entry.get("subject", "")))
             category = entry.get("category", "")
-            label = i18n.t(CATEGORY_LABELS.get(category, category))
-            self.arrived.setItem(index, 2, paint(
-                QTableWidgetItem(label), CATEGORY_COLOURS, category))
-            why = entry.get("reason") or i18n.t(
-                SOURCE_LABELS.get(entry.get("source", ""), ""))
-            self.arrived.setItem(index, 3, QTableWidgetItem(why))
-            self.arrived.setItem(index, 4, QTableWidgetItem(
-                _dmy(entry.get("date", ""))))
+            pair = CATEGORY_COLOURS.get(category)
+            who = entry.get("from_name") or entry.get("from_addr", "")
+            cells = [who, entry.get("subject", ""),
+                    i18n.t(CATEGORY_LABELS.get(category, category)),
+                    entry.get("reason") or i18n.t(
+                        SOURCE_LABELS.get(entry.get("source", ""), "")),
+                    _dmy(entry.get("date", ""))]
+            for column, value in enumerate(cells):
+                cell = QTableWidgetItem(str(value))
+                if pair:
+                    cell.setBackground(theme.qcolor(pair[0]))
+                    cell.setForeground(theme.qcolor(pair[1]))
+                self.arrived.setItem(index, column, cell)
             self.arrived.item(index, 0).setData(
                 Qt.UserRole, entry.get("from_addr", ""))
         self._sorted_mail = rows
@@ -2555,13 +2692,28 @@ class InquiryDialog(QWidget):
                              r.get("Quotation no"))]
 
     @staticmethod
-    def _fill_cells(table: QTableWidget, values: list, status_column=None):
+    def _fill_cells(table: QTableWidget, values: list, status_column=None,
+                    tint: tuple[dict, str] | None = None):
+        """Append one row, tinted as a whole — every cell the same colour,
+        not only the one that happens to print the word — so a long table
+        still reads at arm's length rather than asking the owner to hunt for
+        the one tinted cell in it. `status_column` reads the key straight
+        off the row being drawn; `tint` is for a key that is not itself a
+        printed column (the "waiting" tab never shows raw Status text)."""
         index = table.rowCount()
         table.setRowCount(index + 1)
+        if tint is not None:
+            colours, key = tint
+            pair = colours.get((key or "").strip())
+        elif status_column is not None:
+            pair = STATUS_COLOURS.get(str(values[status_column]).strip())
+        else:
+            pair = None
         for column, value in enumerate(values):
             cell = QTableWidgetItem(str(value))
-            if column == status_column:
-                paint(cell, STATUS_COLOURS, str(value))
+            if pair:
+                cell.setBackground(theme.qcolor(pair[0]))
+                cell.setForeground(theme.qcolor(pair[1]))
             table.setItem(index, column, cell)
 
     def _render_register(self):
@@ -2643,7 +2795,8 @@ class InquiryDialog(QWidget):
                 row.get("Customer", "") or row.get("Email", ""),
                 row.get("Quotation date", ""),
                 _rupees(row.get("Quotation value")), chased,
-                row.get("Inquiry no", "")])
+                row.get("Inquiry no", "")],
+                tint=(STATUS_COLOURS, row.get("Status", "") or register.QUOTED))
             if id(row) in due_ids:
                 paint(self.followups.item(self.followups.rowCount() - 1, 4),
                       {"due": _WARN}, "due")
@@ -2860,6 +3013,70 @@ class InquiryDialog(QWidget):
         if not row:
             return
         _HistoryDialog(row, row.get("Folder", ""), self).exec()
+
+    # ── tab 1-6: open the mail behind the selected row ──────────────────
+    def _open_mail(self, key: str):
+        """The mail itself, in full — every table's double-click, the way
+        the owner asked for it: "if I double click ... so that I can open
+        the mail". `key` is the tab that fired it (see TABS)."""
+        if key == "arrived":
+            index = self.arrived.currentRow()
+            rows = self._sorted_mail or []
+            if not 0 <= index < len(rows):
+                return
+            self._show_mail(_StoredMessage(rows[index]))
+            return
+        if key == "replies":
+            item = self._selected_reply()
+            if item is None:
+                return
+            self._show_mail(item.message)
+            return
+        if key == "orders":
+            item = self._selected_order()
+            if item is None:
+                return
+            if not getattr(item, "message_id", ""):
+                # _RegisterOnlyItem: accepted by hand, no PO mail behind it.
+                QMessageBox.information(
+                    self, i18n.t("No mail on file"),
+                    i18n.t("This order was accepted by hand — there is no "
+                           "PO mail behind it to open."))
+                return
+            self._show_mail(item.message)
+            return
+        # to_quote, waiting, register — the row is the register's own, not
+        # a message; find the mail it came from in the arrived log.
+        row = self._current_row()
+        if row is None:
+            return
+        entry = self._arrived_for(row)
+        if entry is None:
+            QMessageBox.information(
+                self, i18n.t("No mail on file"),
+                i18n.t("Prism can't find the original mail for this "
+                       "inquiry — it may have been entered by hand, or be "
+                       "older than what Prism has kept."))
+            return
+        self._show_mail(_StoredMessage(entry))
+
+    def _arrived_for(self, row: dict) -> dict | None:
+        """The arrived-log entry a register row was built from, found by
+        the same thread identifiers add_thread() already keeps on every
+        row — so "open the mail" works from the register and the daily
+        tabs, not only from All mail itself."""
+        ids = {i for i in (row.get("Thread") or "").split() if i}
+        folder = self._root()
+        if not ids or not folder:
+            return None
+        data = CB.get_worklist().load(folder)
+        for entry in CB.get_worklist().history(data, "arrived"):
+            if (entry.get("message_id") or "") in ids:
+                return entry
+        return None
+
+    def _show_mail(self, message) -> None:
+        _ReadMailDialog(message, self).exec()
 
     def _mark_lost(self):
         row = self._selected_row()

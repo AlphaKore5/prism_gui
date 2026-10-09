@@ -768,12 +768,205 @@ class ColourCarriesMeaning(unittest.TestCase):
         self.assertEqual(cell.background().color().name(),
                          UI.STATUS_COLOURS[register.QUOTED][0])
 
+    def test_a_fresh_inquiry_is_green_the_same_as_an_order_won(self):
+        """His own words: "grey coloured" for a quoted one, "the pending
+        quote in green" for one still New — not a shade of Prism's own
+        choosing, and not merely "informational" the way an in-progress
+        status is."""
+        self.assertEqual(UI.STATUS_COLOURS[register.NEW],
+                         UI.STATUS_COLOURS[register.CONVERTED])
+
+    def test_the_register_row_is_tinted_whole_not_one_cell(self):
+        """The point of colour grading a hundred-row file is reading it at
+        arm's length — a single tinted cell in a row of white ones asks the
+        owner to hunt for it instead."""
+        row = register.from_message(message())
+        register.mark_quoted(row, "QTN/26-27/0001", "1000")
+        register.save([row], mailflow.Paths(self.folder).register_csv)
+        self.dialog._refresh_register()
+        quoted = UI.STATUS_COLOURS[register.QUOTED][0]
+        for column in range(5):
+            cell = self.dialog.register_table.item(0, column)
+            self.assertEqual(cell.background().color().name(), quoted,
+                             f"column {column}")
+
+    def test_a_brand_new_inquiry_is_green_on_the_to_quote_tab_too(self):
+        register.save([register.from_message(message())],
+                     mailflow.Paths(self.folder).register_csv)
+        self.dialog._refresh_register()
+        green = UI.theme.qcolor(UI.STATUS_COLOURS[register.NEW][0])
+        for column in range(5):
+            cell = self.dialog.to_quote_table.item(0, column)
+            self.assertEqual(cell.background().color(), green,
+                             f"column {column}")
+
+    def test_the_waiting_tab_is_tinted_even_though_it_never_prints_status(self):
+        """followups has no column that says "Quoted" — the key comes from
+        the row, not from a column on screen, so the whole-row tint still
+        has to apply."""
+        row = register.from_message(message())
+        register.mark_quoted(row, "QTN/26-27/0001", "1000")
+        register.save([row], mailflow.Paths(self.folder).register_csv)
+        self.dialog._refresh_register()
+        quoted = UI.STATUS_COLOURS[register.QUOTED][0]
+        cell = self.dialog.followups.item(0, 0)
+        self.assertEqual(cell.background().color().name(), quoted)
+
+    def test_an_order_still_needing_its_po_recorded_is_amber(self):
+        """Accepted with no PO yet is the one row on this tab that still
+        needs the owner to do something — amber, same as Negotiating, not
+        the green a PO that already arrived gets."""
+        row = register.from_message(message())
+        register.mark_quoted(row, "QTN/26-27/0001", "1000")
+        row["Status"] = register.ACCEPTED
+        register.save([row], mailflow.Paths(self.folder).register_csv)
+        self.dialog._refresh_register()
+        self.dialog._render_orders()
+        self.assertEqual(self.dialog.orders_table.rowCount(), 1)
+        cell = self.dialog.orders_table.item(0, 0)
+        self.assertEqual(cell.background().color(), UI.theme.qcolor(UI._WARN[0]))
+
+    def test_all_mail_tints_every_column_not_only_the_category(self):
+        entry = {"from_addr": "vendor@example.com", "from_name": "A Vendor",
+                 "subject": "Our catalogue", "category": "vendor",
+                 "reason": "", "source": "", "date": "2026-10-01"}
+        CB.get_worklist().append(self.folder, "arrived", [entry])
+        self.dialog._render_arrived()
+        vendor = UI.CATEGORY_COLOURS["vendor"][0]
+        for column in range(5):
+            cell = self.dialog.arrived.item(0, column)
+            self.assertEqual(cell.background().color().name(), vendor,
+                             f"column {column}")
+
     def test_the_date_column_shows_the_time_as_well(self):
         register.save([register.from_message(message())],
                       mailflow.Paths(self.folder).register_csv)
         self.dialog._refresh_register()
         self.assertIn(_local_clock(),
                       self.dialog.register_table.item(0, 1).text())
+
+
+class OpeningTheMailItself(unittest.TestCase):
+    """"open the mail to see what it says" — every table's double-click now
+    resolves to the real message, or says plainly there isn't one. Never a
+    blank dialog, never a crash."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.dialog = UI.InquiryDialog(ready_cfg(self.folder))
+
+    @staticmethod
+    def _labels(widget) -> list[str]:
+        return [w.text() for w in widget.findChildren(QLabel)]
+
+    @staticmethod
+    def _capture():
+        created = []
+        real = UI._ReadMailDialog
+
+        class _Capturing(real):
+            def exec(self):
+                created.append(self)
+        return created, _Capturing
+
+    def test_arrived_entry_now_keeps_the_body_and_attachments(self):
+        """His own words: "there is only an option for subject, no body" —
+        _arrived_entry() used to leave both out."""
+        msg = message(body="Please quote 10 units.")
+        known = triage.Knowledge.from_dict(self.dialog.cfg["inquiry"]["knowledge"])
+        entry = UI._arrived_entry(msg, triage.rules_pass(msg, known))
+        self.assertIn("Please quote 10 units.", entry["body"])
+        self.assertEqual(entry["attachment_names"], [])
+
+    def test_double_clicking_an_arrived_row_opens_its_real_mail(self):
+        entry = {"from_addr": "buyer@x.example", "from_name": "A Buyer",
+                 "subject": "RFQ for springs", "body": "Kindly quote 500.",
+                 "attachment_names": ["drawing.pdf"], "category": "inquiry",
+                 "reason": "", "source": "", "date": "2026-10-02",
+                 "message_id": "<abc@x>"}
+        CB.get_worklist().append(self.folder, "arrived", [entry])
+        self.dialog._render_arrived()
+        self.dialog.arrived.setCurrentCell(0, 0)
+        created, capturing = self._capture()
+        with _Patched(UI, "_ReadMailDialog", capturing):
+            self.dialog._open_mail("arrived")
+        self.assertEqual(len(created), 1)
+        labels = self._labels(created[0])
+        self.assertTrue(any("Kindly quote 500." in t for t in labels))
+        self.assertTrue(any("drawing.pdf" in t for t in labels))
+
+    def test_a_register_row_finds_its_own_mail_by_thread(self):
+        """Only the arrived log carries the body; the register never does
+        — so this has to cross-reference by the message-id add_thread()
+        already keeps on the row, not read the body off the row itself."""
+        msg = message("RFQ for springs")
+        row = register.from_message(msg)
+        register.save([row], mailflow.Paths(self.folder).register_csv)
+        CB.get_worklist().append(self.folder, "arrived", [{
+            "from_addr": msg.from_addr, "from_name": msg.from_name,
+            "subject": msg.subject, "body": "the real body",
+            "attachment_names": [], "category": "inquiry", "reason": "",
+            "source": "", "date": "2026-10-02", "message_id": msg.message_id}])
+        self.dialog._refresh_register()
+        self.dialog.register_table.setCurrentCell(0, 0)
+        created, capturing = self._capture()
+        with _Patched(UI, "_ReadMailDialog", capturing):
+            self.dialog._open_mail("register")
+        self.assertEqual(len(created), 1)
+        self.assertTrue(any("the real body" in t
+                           for t in self._labels(created[0])))
+
+    def test_a_register_row_with_no_mail_on_file_says_so_plainly(self):
+        register.save([register.from_message(message())],
+                      mailflow.Paths(self.folder).register_csv)
+        self.dialog._refresh_register()
+        self.dialog.register_table.setCurrentCell(0, 0)
+        shown = []
+        with _Patched(UI, "QMessageBox", _Recording(shown)):
+            self.dialog._open_mail("register")
+        self.assertEqual(len(shown), 1)
+
+    def test_a_reply_opens_its_own_message_directly(self):
+        row = register.from_message(message())
+        row["Status"] = register.QUOTED
+        register.save([row], mailflow.Paths(self.folder).register_csv)
+        self.dialog._refresh_register()
+        CB.get_worklist().append(self.folder, "replies", [{
+            "inquiry_no": row["Inquiry no"], "from_addr": "x@y.example",
+            "from_name": "X", "subject": "Re: RFQ",
+            "body": "yes please proceed", "attachment_names": [],
+            "intent": "accepted", "note": "", "folder": "", "files": [],
+            "message_id": "<reply@x>", "date": "2026-10-02"}])
+        self.dialog._render_replies()
+        self.dialog.replies_table.setCurrentCell(0, 0)
+        created, capturing = self._capture()
+        with _Patched(UI, "_ReadMailDialog", capturing):
+            self.dialog._open_mail("replies")
+        self.assertEqual(len(created), 1)
+        self.assertTrue(any("yes please proceed" in t
+                           for t in self._labels(created[0])))
+
+    def test_an_order_accepted_by_hand_has_no_mail_to_open(self):
+        row = register.from_message(message())
+        row["Status"] = register.ACCEPTED
+        register.save([row], mailflow.Paths(self.folder).register_csv)
+        self.dialog._refresh_register()
+        self.dialog._render_orders()
+        self.dialog.orders_table.setCurrentCell(0, 0)
+        shown = []
+        with _Patched(UI, "QMessageBox", _Recording(shown)):
+            self.dialog._open_mail("orders")
+        self.assertEqual(len(shown), 1)
+
+    def test_the_dialog_shows_subject_sender_and_date_too(self):
+        dialog = UI._ReadMailDialog(UI._StoredMessage({
+            "from_name": "A Buyer", "from_addr": "buyer@x.example",
+            "subject": "RFQ for springs", "body": "the body",
+            "attachment_names": [], "date": "2026-10-02"}))
+        labels = self._labels(dialog)
+        self.assertTrue(any("A Buyer" in t and "buyer@x.example" in t
+                           for t in labels))
+        self.assertEqual(dialog.windowTitle(), "RFQ for springs")
 
 
 class CheckingWithoutBeingAsked(unittest.TestCase):
