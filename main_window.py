@@ -1725,20 +1725,13 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _open_login_tabs(self):
-        agents = CB.config.active_agents(self.cfg)
-        if not agents:
-            QMessageBox.information(self, "Login", "No agents configured yet — open Setup first.")
-            return
-        ok, err = CB.automation_available()
-        if not ok:
-            QMessageBox.warning(self, "Login", f"Automation deps not available: {err}")
-            return
-        automation = CB.get_automation()
-        urls = CB.login_tab_urls(agents)
-        automation.open_login_tabs(urls)
-        self.statusBar().showMessage(
-            i18n.t("Opened {n} login tab(s) in Chrome.").format(n=len(urls)),
-            4000)
+        from widgets.login_tabs import open_login_tabs
+        if open_login_tabs(self, CB.config.active_agents(self.cfg),
+                           on_opened=lambda n: self.statusBar().showMessage(
+                               i18n.t("Opened {n} login tab(s) in Chrome.").format(n=n),
+                               4000)):
+            self.statusBar().showMessage(
+                i18n.t("Opening the login tabs in Chrome…"), 15000)
 
     def _show_status(self):
         agents = CB.config.active_agents(self.cfg)

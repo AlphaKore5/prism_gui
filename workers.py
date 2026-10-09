@@ -879,3 +879,32 @@ class FFmpegWorker(_Worker):
                 lambda done, total: self.progress.emit(done, total)))
         except Exception as e:
             self.failed.emit(str(e))
+
+
+class LoginTabsWorker(_Worker):
+    """Open the sign-in tabs in Prism's own Chrome profile, off the UI thread.
+
+    The engine's open_login_tabs copies the real Chrome profile into Prism's
+    the first time — seconds, minutes on a big profile, and on Windows it
+    raises when Chrome holds a file open — then waits for Chrome to start
+    between tabs. On the UI thread that froze the window, and whatever it
+    raised went to the stdout a windowed build does not have: "Open login
+    tabs doesn't do anything" on a fresh Windows 10 install (09-Oct-2026).
+    """
+    done = Signal(int)               # how many tabs were asked for
+    failed = Signal(str)             # what went wrong, in one line
+
+    def __init__(self, urls: list, parent=None):
+        super().__init__(parent)
+        self._urls = list(urls)
+
+    def run(self):
+        try:
+            CB.get_automation().open_login_tabs(self._urls)
+            self.done.emit(len(self._urls))
+        except Exception as e:                      # noqa: BLE001
+            import diagnostics
+            import traceback
+            if getattr(diagnostics, "_installed", False):
+                diagnostics.write("CRASH", traceback.format_exc())
+            self.failed.emit(f"{type(e).__name__}: {e}")
