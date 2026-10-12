@@ -53,6 +53,13 @@ class LeadsPanel(QWidget):
         # at all, so it must not sit past two buttons they were afraid to press.
         self.help_btn = C.icon_button("help", i18n.t("What's on this screen (F1)"),
                                       on_click=self.toggle_help)
+        # The app sheet pads every button in a page header 6px 14px (labelled
+        # buttons); on this 34px glyph button that made it 64x48 beside the 34px
+        # Credits, Export and Send buttons. Its own sheet outranks the header's;
+        # a QSS min/max-width is the content box, so 32 + the 1px borders = 34.
+        self.help_btn.setStyleSheet(
+            "QPushButton#iconBtn{padding:0px;min-width:32px;max-width:32px;"
+            "min-height:32px;max-height:32px;}")
         self.header = C.PageHeader(
             i18n.t(self.TITLE), i18n.t(self.BLURB), [self.help_btn])
         root.addWidget(self.header)

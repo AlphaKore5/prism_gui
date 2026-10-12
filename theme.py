@@ -294,6 +294,15 @@ PAGE_PAD = SPACE_6              # 28 — page edge to content, every screen
 # needs this much extra room under it or Lumi sits on top of it (the pill
 # covered Discard and half of "Start the work", and the mascot stood on Discard).
 LAUNCHER_CLEARANCE = 120
+# Its footprint at the side: the pill (LumiLauncherPill) is 260-285 px wide, 24
+# px in from the window's right edge, and 56 px tall on a 24 px bottom edge.
+# Where a screen pins controls to its foot there is no room for a whole
+# LAUNCHER_CLEARANCE under them (the Leads table is already a few rows tall),
+# so they stop short of the pill instead — LAUNCHER_REACH counted from the
+# window's right edge, in the bottom LAUNCHER_BAND. The Leads bulk bar's "Add to
+# sequence" sat under the pill at every window size until it did.
+LAUNCHER_REACH = 285 + 24
+LAUNCHER_BAND = 56 + 24
 CARD_PAD = SPACE_5              # 20 — card edge to content
 CARD_GAP = SPACE_4              # 16 — gutter between cards in a grid
 ROW_GAP = SPACE_3               # 12 — between rows inside one card

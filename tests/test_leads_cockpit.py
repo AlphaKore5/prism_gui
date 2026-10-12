@@ -685,8 +685,14 @@ class ListsTab(unittest.TestCase):
         self.assertEqual(CK._csv_rows(p), 3)
 
     def test_empty_folder_shows_one_empty_state(self):
+        # The empty state left the grid on 12-Oct-2026 (/polish: Lists said
+        # "nothing yet" in bare grey text while Saved searches had an icon
+        # state): the grid now holds only cards, so an empty folder is no cards
+        # and exactly one EmptyState showing in their place.
         tab = CK._ListsTab(tempfile.mkdtemp())
-        self.assertEqual(tab._grid.count(), 1)
+        self.assertEqual(tab._grid.count(), 0)
+        self.assertFalse(tab._empty.isHidden())
+        self.assertTrue(tab._scroll.isHidden())
 
 
 class _Workbench(unittest.TestCase):

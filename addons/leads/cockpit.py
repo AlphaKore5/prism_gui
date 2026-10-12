@@ -52,7 +52,8 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFrame, QGridLayout, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMenu, QPushButton, QScrollArea, QSizePolicy,
+    QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QPushButton, QScrollArea,
+    QSizePolicy,
     QSplitter, QSplitterHandle, QStackedWidget, QStyle, QStyledItemDelegate,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -289,6 +290,20 @@ def _on_screen(target, root) -> bool:
 def _asset(name: str) -> str:
     """A shipped asset as a stylesheet url() path (forward slashes on Windows)."""
     return paths.resource("assets", name).replace(os.sep, "/")
+
+
+def _combo_sheet() -> str:
+    """The Leads combos' own look — the sort menu's and the page picker's. The
+    app sheet's combo is 36px tall with no arrow, which read as a text box and
+    stood 8px taller than the buttons beside the page picker."""
+    return (
+        f"QComboBox#leadsSort{{background:{theme.CARD};color:{theme.TEXT};"
+        f"border:1px solid {theme.BORDER};border-radius:{theme.R_CONTROL}px;"
+        f"padding:5px 10px;min-height:20px;font-size:13px;}}"
+        f"QComboBox#leadsSort:hover{{border-color:{theme.NEUTRAL[300]};}}"
+        f"QComboBox#leadsSort::drop-down{{border:none;width:22px;}}"
+        f"QComboBox#leadsSort::down-arrow{{image:url({_asset('caret-down.svg')});"
+        f"width:12px;height:12px;}}")
 
 
 def _font(px: int, weight=QFont.Normal, family: str = "") -> QFont:
@@ -1392,14 +1407,7 @@ class LeadsCockpit(QWidget):
         self._sort.setToolTip("Sort")
         # One height with the toggle and the view switch (32px), and a caret:
         # the app sheet's combo is 36px with no arrow, so it read as a text box.
-        self._sort.setStyleSheet(
-            f"QComboBox#leadsSort{{background:{theme.CARD};color:{theme.TEXT};"
-            f"border:1px solid {theme.BORDER};border-radius:{theme.R_CONTROL}px;"
-            f"padding:5px 10px;min-height:20px;font-size:13px;}}"
-            f"QComboBox#leadsSort:hover{{border-color:{theme.NEUTRAL[300]};}}"
-            f"QComboBox#leadsSort::drop-down{{border:none;width:22px;}}"
-            f"QComboBox#leadsSort::down-arrow{{image:url({_asset('caret-down.svg')});"
-            f"width:12px;height:12px;}}")
+        self._sort.setStyleSheet(_combo_sheet())
         self._sort.currentIndexChanged.connect(self._on_sort_changed)
         tlay.addWidget(self._sort)
         self._settings_btn = QPushButton("Search settings")
@@ -1494,8 +1502,8 @@ class LeadsCockpit(QWidget):
             f"border-top:1px solid {theme.HAIRLINE};}}"
             f"QFrame#peoplePager QPushButton{{background:{theme.CARD};"
             f"color:{theme.NEUTRAL[800]};border:1px solid {theme.BORDER};"
-            f"border-radius:{theme.R_CONTROL}px;padding:3px 10px;min-height:20px;"
-            f"font-size:13px;font-weight:600;}}"
+            f"border-radius:{theme.R_CONTROL}px;padding:5px 10px;min-height:20px;"
+            f"min-width:12px;font-size:13px;font-weight:600;}}"
             f"QFrame#peoplePager QPushButton:disabled{{color:{theme.NEUTRAL[300]};"
             f"border-color:{theme.HAIRLINE};}}")
         lay = QHBoxLayout(self._pager)
@@ -1507,7 +1515,8 @@ class LeadsCockpit(QWidget):
         self._next_btn.setToolTip("Next page")
         self._page_box = QComboBox()
         self._page_box.setObjectName("leadsSort")
-        self._page_box.setMinimumWidth(64)
+        self._page_box.setStyleSheet(_combo_sheet())
+        self._page_box.setFixedWidth(72)
         for b in (self._prev_btn, self._next_btn):
             b.setCursor(Qt.PointingHandCursor)
         self._prev_btn.clicked.connect(lambda: self.pageRequested.emit(self._page_index - 1))
@@ -2025,43 +2034,84 @@ class LeadsCockpit(QWidget):
         the rest), from 3 all but Save, the primary and Find e-mails (a list
         with no addresses is unusable, so that stays on the bar as long as it
         fits). Save never folds: it is Apollo's first action, and the one that
-        moves people from Net New to Saved. Nor does Remove: the owner asked
-        for it by name, and a folded one is a button he cannot find."""
-        (_contact, _remove, verify, emails, phones, add_list, export, stage, qualify,
+        moves people from Net New to Saved. Nor does Remove — the owner asked
+        for it by name — until the bar is narrower than anything else can
+        absorb (5): the floating Ask-Lumi pill takes the right 300px of the bar
+        (_launcher_inset), and on a 1366px window that left less than Save,
+        Remove, More and the primary need, so their labels were crushed to
+        stubs ("emov", "i seq"). Folded, Remove is still in More, by name. From
+        6 "Clear selection" goes too (_fit_bulk): the header tick clears as well."""
+        (_contact, remove, verify, emails, phones, add_list, export, stage, qualify,
          _seq) = actions
+        every_extra = (verify, phones, add_list, stage, export, qualify, emails)
         return {2: (verify, phones, add_list, stage),
                 3: (verify, phones, add_list, stage, export, qualify),
-                4: (verify, phones, add_list, stage, export, qualify, emails)}.get(level, ())
+                4: every_extra,
+                5: every_extra + (remove,),
+                6: every_extra + (remove,)}.get(level, ())
 
     def _bulk_need(self, level: int) -> int:
         """The width the bulk bar needs at a compaction level: 0 is all of it;
-        1 drops "Select all N"; 2 to 4 fold actions into More."""
+        1 drops "Select all N"; 2 to 5 fold actions into More; 6 folds
+        "Clear selection" there too."""
         lay = self._bulk_bar_w.layout()
         m = lay.contentsMargins()
-        items = [self._sel_lbl.sizeHint().width() + theme.SPACE_2,
-                 self._bulk_clear.sizeHint().width()]
+        items = [self._sel_lbl.sizeHint().width() + theme.SPACE_2]
+        if level < 6:
+            items.append(self._bulk_clear.sizeHint().width())
         if level < 1 and self._sel_all_wanted:
             items.append(self._sel_all.sizeHint().width())
         folded = self._fold_set(level, self._bulk_actions())
         items += [b.sizeHint().width() for b in self._bulk_actions()
                   if self._wanted(b) and b not in folded]
-        if any(self._wanted(b) for b in folded):
+        if level >= 6 or any(self._wanted(b) for b in folded):
             items.append(self._b_more.sizeHint().width())
         return m.left() + m.right() + sum(items) + lay.spacing() * len(items)
+
+    @staticmethod
+    def _inset_past_launcher(room: int) -> int:
+        """How much of the bar's right edge the Ask-Lumi pill covers, given
+        `room` px between the bar and the window's right edge, plus a gap."""
+        return max(0, theme.LAUNCHER_REACH + theme.SPACE_2 - room)
+
+    def _launcher_inset(self) -> int:
+        """How far the bulk bar's contents stop short of its right edge so the
+        floating Ask-Lumi pill (theme.LAUNCHER_REACH) does not sit on top of
+        them. The bar is pinned to the foot of the results, exactly where the
+        pill floats, and at every window size it covered Find e-mails, More and
+        the primary Add to sequence (12-Oct-2026, real-window renders at 1920,
+        1536 and 1366). 0 outside the real window — there is no pill in a test
+        or a dialog — and while the bar is not showing."""
+        win = self.window()
+        bar = self._bulk_bar_w
+        if not isinstance(win, QMainWindow) or not self._bulk.isVisible():
+            return 0
+        central = win.centralWidget() or win
+        if bar.mapTo(central, bar.rect().bottomLeft()).y() < central.height() - theme.LAUNCHER_BAND:
+            return 0                        # the bar sits above the pill's band
+        room = win.width() - (bar.mapTo(win, bar.rect().topRight()).x() + 1)
+        return self._inset_past_launcher(room)
 
     def _fit_bulk(self) -> None:
         """Show the bulk actions that fit; fold the rest into More. Off screen
         every wanted action shows, as on a wide window."""
+        lay = self._bulk_bar_w.layout()
+        m = lay.contentsMargins()
+        right = theme.SPACE_4 + self._launcher_inset()
+        if m.right() != right:
+            lay.setContentsMargins(m.left(), m.top(), right, m.bottom())
         level = 0
         if self._bulk.isVisible():
             width = self._bulk_bar_w.width()
-            while level < 4 and self._bulk_need(level) > width:
+            while level < 6 and self._bulk_need(level) > width:
                 level += 1
         folded = self._fold_set(level, self._bulk_actions())
         for b in self._bulk_actions():
             b.setVisible(self._wanted(b) and b not in folded)
         self._sel_all.setVisible(self._sel_all_wanted and level < 1)
-        self._bulk_folded = [b for b in folded if self._wanted(b)]
+        self._bulk_clear.setVisible(level < 6)
+        self._bulk_folded = ([self._bulk_clear] if level >= 6 else []) + [
+            b for b in folded if self._wanted(b)]
         self._b_more.setVisible(bool(self._bulk_folded))
 
     def _show_more(self) -> None:
@@ -3192,6 +3242,7 @@ def _stat_card(label: str, value: str, sub: str = "", accent: bool = False) -> Q
     v.addWidget(num)
     if sub:
         v.addWidget(_muted(sub, 11))
+    v.addStretch(1)         # top-aligned: a tile with a caption must not move its siblings' numbers
     f._num = num
     return f
 
@@ -3251,7 +3302,16 @@ class _ListsTab(QWidget):
             "Open one to work it in Excel, or bring it back with Import on the "
             "People tab.")))
 
+        # The empty state sits in the page, not the grid (as on Saved searches):
+        # EmptyState centres itself in the height it is given.
+        self._empty = C.EmptyState(
+            "file", "No lists yet",
+            "Find new people, or tick people on the People tab and press Add "
+            "to list — the files will appear here.")
+        root.addWidget(self._empty, 1)
+
         scroll = QScrollArea()
+        self._scroll = scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
@@ -3287,15 +3347,9 @@ class _ListsTab(QWidget):
     def refresh(self) -> None:
         _clear(self._grid)
         files = self._scan()
+        self._empty.setVisible(not files)
+        self._scroll.setVisible(bool(files))
         if not files:
-            empty = QLabel(
-                "No lists yet.\n\nFind new people, or tick people on the People "
-                "tab and press Add to list — the files will appear here.")
-            empty.setAlignment(Qt.AlignCenter)
-            empty.setWordWrap(True)
-            empty.setStyleSheet(
-                f"color:{theme.NEUTRAL[500]};font-size:13px;padding:40px;")
-            self._grid.addWidget(empty, 0, 0, 1, 2)
             return
         for i, (path, name, size, mtime) in enumerate(files):
             self._grid.addWidget(self._file_card(path, name, size, mtime),
@@ -3386,7 +3440,14 @@ class _SessionsTab(QWidget):
             "A new search skips everyone these sessions already pulled — turn "
             "that off in the search panel to go through them again."))
 
+        self._empty = C.EmptyState(
+            "clock", "No sessions yet",
+            "Every run you prepare is kept here — its leads, drafts and send "
+            "status — so you can come back to it.")
+        root.addWidget(self._empty, 1)
+
         scroll = QScrollArea()
+        self._scroll = scroll
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
@@ -3421,14 +3482,9 @@ class _SessionsTab(QWidget):
     def refresh(self) -> None:
         _clear(self._grid)
         heads = self._headers()
+        self._empty.setVisible(not heads)
+        self._scroll.setVisible(bool(heads))
         if not heads:
-            empty = QLabel(
-                "No sessions yet.\n\nEvery run you prepare is kept here — its "
-                "leads, drafts and send status — so you can come back to it.")
-            empty.setAlignment(Qt.AlignCenter)
-            empty.setWordWrap(True)
-            empty.setStyleSheet(f"color:{theme.NEUTRAL[500]};font-size:13px;padding:40px;")
-            self._grid.addWidget(empty, 0, 0, 1, 2)
             return
         for i, head in enumerate(heads):
             self._grid.addWidget(self._session_card(head), i // 2, i % 2)
