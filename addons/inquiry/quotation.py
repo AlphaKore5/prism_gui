@@ -37,7 +37,7 @@ import email_config
 import i18n
 import theme
 from dialogs.base import PrismDialog
-from addons.inquiry import autoquote
+from addons.inquiry import autoquote, documents
 from addons.inquiry.setup import (
     InquirySetupDialog, accounts_of, is_ready, settings_of,
 )
@@ -62,6 +62,25 @@ def _warning_css() -> str:
             f" border: 1px solid {theme.WARN};"
             f" border-radius: {theme.R_CONTROL}px;"
             f" padding: {theme.SPACE_2}px {theme.SPACE_3}px;")
+
+
+def confident_match(matches: list) -> bool:
+    """Whether the best rate-list row may be shown as a "Confident match".
+
+    quoting.is_confident() is about the margin over the runner-up. On top of
+    that: a lone candidate needs two shared words, and a match made of
+    numbers alone never counts. Both come from a real quotation that went
+    out at ₹12,98,000: "this product, 10 nos" shared nothing with the rate
+    list but the quantity, and the row that happened to have a 10 in it
+    was priced as if Prism were sure.
+    """
+    quoting = CB.get_quoting()
+    if not matches or not quoting.is_confident(matches):
+        return False
+    best = matches[0].matched
+    if all(word.replace(".", "").isdigit() for word in best):
+        return False
+    return len(matches) > 1 or len(best) >= 2
 
 
 class _POReviewDialog(PrismDialog):
@@ -240,7 +259,13 @@ class QuotationDialog(PrismDialog):
         self._populating = False
 
         quoting = CB.get_quoting()
-        self.matches = quoting.match_item(row.get("Product asked", ""), items)
+        # What they typed AND what their picture says: "this product" in the
+        # mail with "SS Locker (8 Comp)" in the attached image is one request.
+        picture_lines = " ".join(
+            ln.strip() for ln in autoquote.picture_text(row).splitlines()
+            if ln.strip() and not ln.startswith("["))
+        self.matches = quoting.match_item(
+            f"{row.get('Product asked', '')} {picture_lines}".strip(), items)
         # Codes are exact: every rate-list code the mail names, with the
         # quantity written beside it. Two or more become a lines table;
         # one prefills the form below; none leaves the fuzzy match to do
@@ -251,7 +276,9 @@ class QuotationDialog(PrismDialog):
         layout = self.body
         layout.setSpacing(theme.ROW_GAP)
 
-        self._confident = quoting.is_confident(self.matches) or bool(
+        # One shared word is not enough to price a customer's request
+        # unattended; the owner is asked to check it. See confident_match().
+        self._confident = confident_match(self.matches) or bool(
             self.requests and all(r.confident for r in self.requests))
 
         # Side by side, because the one judgement this whole dialog exists
@@ -552,12 +579,24 @@ class QuotationDialog(PrismDialog):
                 text(3) or req.item.unit, rate, req.item.hsn, basis=basis))
         return lines
 
+    def _numbers_taken(self) -> list:
+        """See autoquote.numbers_in_use(); read once for this window."""
+        if getattr(self, "_taken", None) is None:
+            root = ""
+            try:
+                root = self.parent_dialog._paths().root
+            except Exception:                           # noqa: BLE001
+                pass
+            self._taken = autoquote.numbers_in_use(root)
+        return self._taken
+
     def _finalise_lines(self):
         quoting = CB.get_quoting()
         settings = settings_of(self.cfg)
         lines = self._lines_from_table()
         rows = getattr(self.parent_dialog, "_register_rows", []) or []
-        self.quote = autoquote.build_quotation(self.cfg, self.row, rows, lines)
+        self.quote = autoquote.build_quotation(self.cfg, self.row, rows, lines,
+                                               self._numbers_taken())
         self._filling_lines = True
         for r, line in enumerate(lines):
             cell = self.lines_table.item(r, 5)
@@ -617,7 +656,8 @@ class QuotationDialog(PrismDialog):
         quoting = CB.get_quoting()
         settings = settings_of(self.cfg)
         rows = getattr(self.parent_dialog, "_register_rows", []) or []
-        self.quote = autoquote.build_quotation(self.cfg, self.row, rows, [line])
+        self.quote = autoquote.build_quotation(self.cfg, self.row, rows, [line],
+                                               self._numbers_taken())
         self.preview.setPlainText(
             quoting.render_text(self.quote, settings.get("company", "")))
         self.quote_line_label.setText(
@@ -744,8 +784,10 @@ class QuotationDialog(PrismDialog):
         folder = self.row.get("Folder", "") or paths.root
         try:
             os.makedirs(folder, exist_ok=True)
-            written = quoting.write_csv(self.quote, os.path.join(
-                folder, f"{self.quote.number.replace('/', '-')}.csv"))
+            # The CSV is the record Prism reads back; the PDF, on the
+            # company's name, is what the customer is sent ([3]).
+            written, pdf = documents.quotation_files(
+                self.quote, settings_of(self.cfg), folder)
         except Exception as e:
             parent._explain(str(e))
             return
@@ -757,8 +799,8 @@ class QuotationDialog(PrismDialog):
         # revision later lands in the SAME folder as the original quote.
         try:
             task = self.row.get("Inquiry no", "") or self.quote.number
-            CB.config.save_artifact(written, self.quote.number, kind="quote",
-                                    task=task)
+            CB.config.save_artifact(pdf or written, self.quote.number,
+                                    kind="quote", task=task)
         except Exception:                               # noqa: BLE001
             pass
 
@@ -776,15 +818,19 @@ class QuotationDialog(PrismDialog):
             # confirms who is being sent a quotation, and for how much. The
             # confirmation has to say what is actually about to happen.
             sender = self._sender()
+            question = i18n.t("Send this quotation to {who} for "
+                              "₹{total}, from {from}?").replace(
+                "{who}", address).replace(
+                "{total}", quoting.indian_currency(self.quote.total)
+            ).replace("{from}", sender.get("address", "")
+                      or i18n.t("your account"))
+            if not pdf:
+                # Said before Yes, not after: the customer would otherwise
+                # get a CSV the owner thought was a PDF (review F6).
+                question = f"{documents.pdf_fallback_note()}\n\n{question}"
             confirm = QMessageBox(
                 QMessageBox.Question, i18n.t("Send the quotation"),
-                i18n.t("Send this quotation to {who} for "
-                       "₹{total}, from {from}?").replace(
-                    "{who}", address).replace(
-                    "{total}", quoting.indian_currency(self.quote.total)
-                ).replace("{from}", sender.get("address", "")
-                          or i18n.t("your account")),
-                QMessageBox.Yes | QMessageBox.No, self)
+                question, QMessageBox.Yes | QMessageBox.No, self)
             confirm.setTextFormat(Qt.PlainText)
             confirm.setDefaultButton(QMessageBox.No)
             if confirm.exec() != QMessageBox.Yes:
@@ -803,8 +849,7 @@ class QuotationDialog(PrismDialog):
                 [{"email": address,
                   "name": self.row.get("Contact person", "")}],
                 self.subject.text(), self.mail_body.toPlainText(),
-                [{"path": written, "name": os.path.basename(written),
-                  "mime": "text/csv"}])
+                [documents.attachment_for(written, pdf)])
             self._send_worker.done.connect(
                 lambda sent, failed: self._sent(sent, failed))
             self._send_worker.failed.connect(self._send_failed)
@@ -852,8 +897,12 @@ class QuotationDialog(PrismDialog):
             self.row["Notes"] = (self.row.get("Notes", "") + " " +
                                  i18n.t("quotation prepared, not sent")).strip()
         try:
-            register.save(getattr(self.parent_dialog, "_register_rows", []),
-                          paths.register_csv)
+            save = getattr(self.parent_dialog, "_save_register", None)
+            if save is not None:
+                save()          # keeps rows added to the file since it was read
+            else:
+                register.save(getattr(self.parent_dialog, "_register_rows", []),
+                              paths.register_csv)
         except Exception as e:
             self.parent_dialog._explain(str(e))
             return
@@ -1082,7 +1131,8 @@ class _CompareDialog(PrismDialog):
         try:
             if folder and os.path.isdir(folder):
                 return [os.path.join(folder, n) for n in sorted(os.listdir(folder))
-                        if n.lower().endswith(DRAWING_EXTENSIONS)]
+                        if n.lower().endswith(DRAWING_EXTENSIONS)
+                        and not documents.is_ours(n)]
         except OSError:
             pass
         return []

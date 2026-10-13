@@ -149,6 +149,64 @@ INFO = "#0284c7"
 INFO_INK = "#0369a1"
 INFO_BG = "rgba(2, 132, 199, 0.14)"
 
+# ── the inquiry register's states ([12][15][17], owner's decision 13 Oct 2026)
+# One colour per state, the same on every register tab, in the Excel copy
+# and in its legend: yet to quote blue, quoted grey, no reply amber,
+# negotiating orange, won green, lost red. Solid hexes, not rgba: the tint
+# has to be the same colour on screen and in an .xlsx, and an rgba over a
+# frosted card is not. None of these is an _ACCENT_HEXES entry, so a role's
+# accent rotation never turns "yet to quote" into its own hue.
+# Each state has a light and a dark pair (background, ink). The light set
+# is a soft wash with the state's own dark ink, the look the register had
+# before (13 Oct, round 3): the round-2 blue (#a9cdfc) was strong enough
+# that every New row read as a picked row. A picked row is now a charcoal
+# fill (_TintedCellDelegate), never a tint. Measured in
+# tests/test_register_colours.py: in light every ink is at least 7:1 on its
+# background, in dark at least 4.5:1 (white on a saturated orange tops out
+# near 5:1); every two backgrounds are at least 10 apart in CIEDE2000 in
+# light (pale washes; the inks differ too) and 15 in dark, where 2 to 3 is
+# the "just noticeable" step. The grey is a warm grey so it stays clear of
+# the pale blue.
+REGISTER_STATES = ("new", "quoted", "no_reply", "negotiating", "won", "lost")
+REGISTER_TONES = {
+    "light": {
+        "new":         ("#d9e8fe", "#1e3a8a"),   # blue
+        "quoted":      ("#e7e5e4", "#44403c"),   # grey
+        "no_reply":    ("#fdf0b5", "#713f12"),   # amber
+        "negotiating": ("#ffdcbc", "#7c2d12"),   # orange
+        "won":         ("#cff3da", "#14532d"),   # green
+        "lost":        ("#fdd4d4", "#7f1d1d"),   # red
+    },
+    "dark": {
+        "new":         ("#1e40af", "#eff6ff"),
+        "quoted":      ("#52525b", "#fafafa"),
+        "no_reply":    ("#7c5800", "#fefce8"),
+        "negotiating": ("#c2410c", "#ffffff"),
+        "won":         ("#166534", "#f0fdf4"),
+        "lost":        ("#7f1d1d", "#fef2f2"),
+    },
+}
+
+
+def is_dark_palette() -> bool:
+    """Whether the running app paints dark. apply_palette() pins light today,
+    so this is False in practice; it is here so the register's colours follow
+    if that ever changes, instead of putting dark ink on a dark row."""
+    try:
+        from PySide6.QtWidgets import QApplication
+        app = QApplication.instance()
+        return bool(app) and app.palette().window().color().lightness() < 128
+    except Exception:                                   # noqa: BLE001
+        return False
+
+
+def register_tones(dark: bool | None = None) -> dict:
+    """{state: (background, ink)} for the light or the dark palette."""
+    if dark is None:
+        dark = is_dark_palette()
+    return REGISTER_TONES["dark" if dark else "light"]
+
+
 TAG_TONES = {
     "tagAccent": ("rgba(0, 0, 0, 0.06)", "#09090b"),
     "tagOutline": ("rgba(255, 255, 255, 0.85)", "#09090b"),

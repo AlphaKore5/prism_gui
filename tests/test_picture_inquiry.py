@@ -139,7 +139,8 @@ class TheCheckReadsWhatItFiles(unittest.TestCase):
         item = result.new_inquiries[0]
         kept = ocr.recall(item.folder)
         self.assertIn("KJP3", kept)
-        self.assertIn("[catalogue-crop.png]", kept)
+        # Saved under its inquiry number since [3]; the sender's name stays.
+        self.assertIn("[INQ-26-27-0001_catalogue-crop.png]", kept)
         row = register.load(self.paths.register_csv)[0]
         self.assertIn("KJP3", row["Product asked"])
         self.assertIn("read from the picture", row["Product asked"])

@@ -208,6 +208,13 @@ class TheAutomaticSend(unittest.TestCase):
         self.assertTrue(row["Quotation no"])
         self.assertIn("quoted automatically", row["Notes"])
 
+    def test_the_customer_is_sent_a_pdf_and_the_csv_stays_on_file(self):
+        """[3]: a quotation on the company's name, not a bare CSV."""
+        self._check_with("Please send 40 pcs of 1128K and 1129K x 10. Thanks")
+        sent = _FakeSendWorker.sent[0].files
+        self.assertEqual([f["mime"] for f in sent], ["application/pdf"])
+        self.assertTrue(os.path.exists(sent[0]["path"][:-4] + ".csv"))
+
     def test_a_code_without_a_quantity_is_held_with_the_reason(self):
         dialog, row = self._check_with("Please quote 1128K and 1129K x 10")
         self.assertEqual(_FakeSendWorker.sent, [])

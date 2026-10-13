@@ -24,6 +24,7 @@ from datetime import date
 
 import core_bridge as CB
 import i18n
+from addons.inquiry import documents
 from addons.inquiry.setup import settings_of
 
 
@@ -106,12 +107,29 @@ def terms_of(cfg: dict):
         delivery=terms_cfg.get("delivery", "") or "")
 
 
-def build_quotation(cfg: dict, row: dict, register_rows: list, lines: list):
+def numbers_in_use(root: str) -> list:
+    """Numbers already given out outside the register (folders, saved
+    quotation files, sent subjects) -- the floor build_quotation() numbers
+    above. Read once per window or per batch, not per keystroke: it lists
+    every inquiry folder, which on a shared drive is not free."""
+    if not root:
+        return []
+    try:
+        mailflow = CB.get_mailflow()
+        return mailflow.numbers_in_use(mailflow.Paths(root))
+    except Exception:                                   # noqa: BLE001
+        return []
+
+
+def build_quotation(cfg: dict, row: dict, register_rows: list, lines: list,
+                    taken=()):
     """The Quotation object the window and the automatic path both send:
-    numbered off the register, dated today, under the saved terms."""
+    numbered off the register (and above `taken`, see numbers_in_use()),
+    dated today, under the saved terms."""
     quoting = CB.get_quoting()
     return quoting.Quotation(
-        number=quoting.next_quote_number(register_rows or []), date=date.today(),
+        number=quoting.next_quote_number(register_rows or [], taken=taken),
+        date=date.today(),
         customer=row.get("Customer", "") or row.get("Email", ""),
         contact=row.get("Contact person", ""),
         email=row.get("Email", ""),
@@ -138,11 +156,10 @@ def covering_mail(quote, settings: dict) -> tuple[str, str]:
     """Subject and body for an automatic send -- the same defaults the
     quotation window fills in, plus the priced lines in the body so the
     customer sees the figures without opening the attachment."""
-    quoting = CB.get_quoting()
     first = quote.lines[0].description if quote.lines else ""
     subject = f"{i18n.t('Quotation')} {quote.number} — {first[:50]}"
     body = default_body(quote, settings)
-    body += "\n\n" + quoting.render_text(quote, settings.get("company", ""))
+    body += "\n\n" + documents.plain_summary(quote)
     return subject, body
 
 

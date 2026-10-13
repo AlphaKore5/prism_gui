@@ -129,6 +129,14 @@ def _local_clock(header: str = _FIXTURE_DATE) -> str:
     return parsedate_to_datetime(header).astimezone().strftime("%H:%M")
 
 
+def _ancestors(widget, root):
+    """The widgets between `widget` and `root`, not counting either."""
+    parent = widget.parentWidget()
+    while parent is not None and parent is not root:
+        yield parent
+        parent = parent.parentWidget()
+
+
 def ready_cfg(folder: str) -> dict:
     return {"api_key": "", "inquiry": {
         "account": {"address": "sales@acme.co.in", "password": "p",
@@ -768,13 +776,14 @@ class ColourCarriesMeaning(unittest.TestCase):
         self.assertEqual(cell.background().color().name(),
                          UI.STATUS_COLOURS[register.QUOTED][0])
 
-    def test_a_fresh_inquiry_is_green_the_same_as_an_order_won(self):
-        """His own words: "grey coloured" for a quoted one, "the pending
-        quote in green" for one still New — not a shade of Prism's own
-        choosing, and not merely "informational" the way an in-progress
-        status is."""
+    def test_a_fresh_inquiry_is_blue_not_the_green_of_an_order_won(self):
+        """The owner's decision of 13 Oct 2026 ([12][15][17]): yet to quote
+        is blue, won is green. Until then New and Converted were one green,
+        so a register could not say which rows were money already won."""
+        self.assertNotEqual(UI.STATUS_COLOURS[register.NEW],
+                            UI.STATUS_COLOURS[register.CONVERTED])
         self.assertEqual(UI.STATUS_COLOURS[register.NEW],
-                         UI.STATUS_COLOURS[register.CONVERTED])
+                         UI.theme.REGISTER_TONES["light"]["new"])
 
     def test_the_register_row_is_tinted_whole_not_one_cell(self):
         """The point of colour grading a hundred-row file is reading it at
@@ -790,14 +799,14 @@ class ColourCarriesMeaning(unittest.TestCase):
             self.assertEqual(cell.background().color().name(), quoted,
                              f"column {column}")
 
-    def test_a_brand_new_inquiry_is_green_on_the_to_quote_tab_too(self):
+    def test_a_brand_new_inquiry_is_blue_on_the_to_quote_tab_too(self):
         register.save([register.from_message(message())],
                      mailflow.Paths(self.folder).register_csv)
         self.dialog._refresh_register()
-        green = UI.theme.qcolor(UI.STATUS_COLOURS[register.NEW][0])
+        blue = UI.theme.qcolor(UI.STATUS_COLOURS[register.NEW][0])
         for column in range(5):
             cell = self.dialog.to_quote_table.item(0, column)
-            self.assertEqual(cell.background().color(), green,
+            self.assertEqual(cell.background().color(), blue,
                              f"column {column}")
 
     def test_the_waiting_tab_is_tinted_even_though_it_never_prints_status(self):
@@ -812,10 +821,10 @@ class ColourCarriesMeaning(unittest.TestCase):
         cell = self.dialog.followups.item(0, 0)
         self.assertEqual(cell.background().color().name(), quoted)
 
-    def test_an_order_still_needing_its_po_recorded_is_amber(self):
-        """Accepted with no PO yet is the one row on this tab that still
-        needs the owner to do something — amber, same as Negotiating, not
-        the green a PO that already arrived gets."""
+    def test_an_order_still_needing_its_po_recorded_is_green(self):
+        """Accepted with no PO yet is a yes: green, with Converted, as the
+        owner's list of 13 Oct 2026 puts it. Amber now means "no reply", so
+        it can no longer double as "record the PO"."""
         row = register.from_message(message())
         register.mark_quoted(row, "QTN/26-27/0001", "1000")
         row["Status"] = register.ACCEPTED
@@ -824,7 +833,8 @@ class ColourCarriesMeaning(unittest.TestCase):
         self.dialog._render_orders()
         self.assertEqual(self.dialog.orders_table.rowCount(), 1)
         cell = self.dialog.orders_table.item(0, 0)
-        self.assertEqual(cell.background().color(), UI.theme.qcolor(UI._WARN[0]))
+        self.assertEqual(cell.background().color(),
+                         UI.theme.qcolor(UI.STATUS_COLOURS[register.CONVERTED][0]))
 
     def test_all_mail_tints_every_column_not_only_the_category(self):
         entry = {"from_addr": "vendor@example.com", "from_name": "A Vendor",
@@ -1095,6 +1105,23 @@ class WhatTheCustomerSaidBack(unittest.TestCase):
             "reply", message("Re: Enquiry", body="Please go ahead."),
             self.dialog._register_rows[0], intent=intent)]
         return result
+
+    def test_to_quote_does_not_open_on_the_row_they_answered_picked(self):
+        """They answered picks its first row by itself. That pick followed
+        the next reload into To quote, which now lists quoted rows in grey,
+        so To quote opened with a row the owner never chose in its panel
+        (13 Oct, seen in the real window)."""
+        self.dialog._fill_replies(self._result())
+        self.assertEqual(self.dialog.replies_table.currentRow(), 0)
+        self.dialog._refresh_register()
+        self.assertEqual(self.dialog.to_quote_table.currentRow(), -1)
+        self.assertEqual(self.dialog._pages["to_quote"].panel.title.text(),
+                         UI.i18n.t("Pick a row above."))
+
+    def test_a_row_the_owner_picked_on_to_quote_is_kept_over_a_reload(self):
+        self.dialog.to_quote_table.setCurrentCell(0, 0)
+        self.dialog._refresh_register()
+        self.assertEqual(self.dialog.to_quote_table.currentRow(), 0)
 
     def test_replies_are_listed_with_what_prism_made_of_them(self):
         self.dialog._fill_replies(self._result())
@@ -1904,6 +1931,86 @@ class EverythingIsReadableAtTheSmallestSize(unittest.TestCase):
         squeezed everything else when the window was short."""
         for box in (self.dialog.reply_text,):
             self.assertLess(box.minimumHeight(), box.maximumHeight())
+
+    # The tab page's size in the real window at 1078x900 (13 Oct 2026).
+    PAGE_AT_1078 = (718, 512)
+
+    def _lay_out_at(self, key, size):
+        from PySide6.QtCore import QRect
+        from PySide6.QtWidgets import QWidget
+        self.dialog.tabs.setCurrentIndex(UI.TAB_INDEX[key])
+        page = self.dialog._pages[key]
+        page.setGeometry(QRect(0, 0, *size))
+        for _ in range(2):          # height-for-width settles on the second
+            for widget in [page] + page.findChildren(QWidget):
+                if widget.layout() is not None:
+                    widget.layout().activate()
+        return page
+
+    @staticmethod
+    def _overlapping(root):
+        """Pairs of visible controls under `root` drawn over each other."""
+        from PySide6.QtCore import QPoint, QRect
+        from PySide6.QtWidgets import (QAbstractButton, QComboBox, QLabel,
+                                       QLineEdit, QPlainTextEdit, QWidget)
+        kinds = (QAbstractButton, QComboBox, QLabel, QLineEdit, QPlainTextEdit)
+        controls = [w for w in root.findChildren(QWidget)
+                    if isinstance(w, kinds) and w.isVisibleTo(root) and w.width() > 0 and w.height() > 0
+                    and not any(isinstance(a, kinds) for a in _ancestors(w, root))]
+        rect = lambda w: QRect(w.mapTo(root, QPoint(0, 0)), w.size())  # noqa: E731
+        return [(a.objectName() or type(a).__name__, getattr(a, "text", str)(),
+                 b.objectName() or type(b).__name__, getattr(b, "text", str)())
+                for i, a in enumerate(controls) for b in controls[i + 1:]
+                if rect(a).intersects(rect(b))]
+
+    def test_they_answered_draws_nothing_over_anything_at_1078(self):
+        """The real window: "Prism thinks:" drawn over the reply text, and
+        once "Delete from this list" joined the buttons the picker drew
+        empty and "Update the register" as a black block."""
+        row = self.dialog._register_rows[3]
+        result = mailflow.Result()
+        result.replies = [mailflow.Item(
+            "reply", message("Re: Enquiry", body="Please go ahead.\n" * 12),
+            row, intent="accepted")]
+        self.dialog._fill_replies(result)
+        page = self._lay_out_at("replies", self.PAGE_AT_1078)
+        self.assertEqual(self.dialog.replies_table.currentRow(), 0)
+        self.assertTrue(self.dialog.apply_btn.isVisibleTo(page.panel))
+        self.assertEqual(self._overlapping(page.panel), [])
+        for widget in (self.dialog.reply_text, self.dialog.intent_picker,
+                       self.dialog.apply_btn,
+                       *[b for b in page.panel.buttons.values()
+                         if b.isVisibleTo(page.panel)]):
+            bottom = widget.mapTo(page.panel, widget.rect().bottomLeft()).y()
+            self.assertLess(bottom, page.panel.height(),
+                            f"{type(widget).__name__} is cut off below")
+            self.assertGreaterEqual(widget.height(), widget.minimumHeight())
+        self.assertGreaterEqual(self.dialog.intent_picker.height(),
+                                self.dialog.intent_picker.minimumHeight())
+        # and the table above it keeps a header and two rows
+        self.assertGreaterEqual(
+            page.stack.height(),
+            2 * self.dialog.replies_table.verticalHeader().defaultSectionSize())
+
+    def test_the_register_toolbar_keeps_a_usable_search_box_at_1078(self):
+        """"Save as Excel…" squeezed the search box to "Fin…", and the
+        All/Open/Won/Lost chips were stacked one above the other."""
+        page = self._lay_out_at("register", self.PAGE_AT_1078)
+        search = page.search
+        fm = search.fontMetrics()
+        self.assertGreaterEqual(search.width(), fm.averageCharWidth() * 18)
+        self.assertGreaterEqual(search.width(), search.minimumWidth())
+        chips = list(self.dialog.register_chips._buttons.values())
+        self.assertEqual(len({c.y() for c in chips}), 1,
+                         "the chips must sit on one line")
+        self.assertEqual(self._overlapping(page.toolbar), [])
+        for btn in page.toolbar.findChildren(type(chips[0])):
+            if btn.isVisibleTo(page.toolbar) and btn.text():
+                self.assertGreaterEqual(
+                    btn.width(), btn.fontMetrics().horizontalAdvance(btn.text()),
+                    btn.text())
+                right = btn.mapTo(page.toolbar, btn.rect().topRight()).x()
+                self.assertLessEqual(right, page.toolbar.width(), btn.text())
 
 
 class CorrectingTheRegisterByHand(unittest.TestCase):
@@ -2978,6 +3085,310 @@ class TheSetupQuestionOnlyInterruptsItsOwnScreen(unittest.TestCase):
         self.assertTrue(dialog._is_the_open_screen())
         dialog._first_look()
         self.assertEqual(len(self.asked), 1)
+
+
+class DeletingSeveralAtOnce(unittest.TestCase):
+    """[7]: ctrl/shift-click several rows, one Delete, one question. On the
+    register tabs the rows leave the register; on "They answered" and
+    "Order came" only the mails leave that list."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.paths = mailflow.Paths(self.folder)
+        rows = []
+        for n, who in enumerate(("a@one.in", "b@two.in", "c@three.in"), 1):
+            row = register.from_message(
+                message(f"Enquiry {n}", f"Buyer {n} <{who}>"), rows=rows)
+            rows.append(row)
+        register.save(rows, self.paths.register_csv)
+        self.dialog = UI.InquiryDialog(ready_cfg(self.folder))
+        self.dialog._refresh_register()
+
+    def _pick(self, table, *indexes):
+        from PySide6.QtCore import QItemSelectionModel
+        table.setCurrentCell(indexes[0], 0)
+        model = table.selectionModel()
+        for index in indexes[1:]:
+            model.select(table.model().index(index, 0),
+                         QItemSelectionModel.Select | QItemSelectionModel.Rows)
+
+    def _answer(self, answers, call):
+        given = iter(answers)
+        asked = []
+
+        class Box:
+            Yes, No = UI.QMessageBox.Yes, UI.QMessageBox.No
+
+            @staticmethod
+            def question(parent, title, text, *a, **k):
+                asked.append(text)
+                return next(given)
+
+            @staticmethod
+            def information(*a, **k):
+                pass
+        with _Patched(UI, "QMessageBox", Box), _NoSave() as saver:
+            call()
+        return asked, saver.saved
+
+    def _numbers(self):
+        return [r["Inquiry no"] for r in register.load(self.paths.register_csv)]
+
+    def test_the_register_tables_take_several_rows_and_all_mail_does_not(self):
+        from PySide6.QtWidgets import QAbstractItemView
+        for table in (self.dialog.to_quote_table, self.dialog.followups,
+                      self.dialog.register_table, self.dialog.replies_table,
+                      self.dialog.orders_table):
+            self.assertEqual(table.selectionMode(),
+                             QAbstractItemView.ExtendedSelection)
+        self.assertEqual(self.dialog.arrived.selectionMode(),
+                         QAbstractItemView.SingleSelection)
+
+    def test_two_picked_rows_go_with_one_question(self):
+        self._pick(self.dialog.register_table, 0, 2)
+        asked, _ = self._answer([UI.QMessageBox.Yes, UI.QMessageBox.No],
+                                self.dialog._delete_inquiry)
+        self.assertEqual(self._numbers(), ["INQ/26-27/0002"])
+        self.assertEqual(len(asked), 2)            # delete?, then block?
+        self.assertIn("2", asked[0])
+        self.assertIn("INQ/26-27/0001", asked[0])
+        self.assertIn("INQ/26-27/0003", asked[0])
+
+    def test_the_button_says_how_many(self):
+        page = self.dialog._pages["register"]
+        self._pick(self.dialog.register_table, 0, 1)
+        self.assertIn("2", page.panel.buttons["delete"].text())
+        self.dialog.register_table.setCurrentCell(2, 0)
+        self.assertEqual(page.panel.buttons["delete"].text(),
+                         UI.i18n.t("Delete this inquiry"))
+
+    def test_to_quote_deletes_several_too(self):
+        self._pick(self.dialog.to_quote_table, 1, 2)
+        self._answer([UI.QMessageBox.Yes, UI.QMessageBox.No],
+                     self.dialog._delete_inquiry)
+        self.assertEqual(self._numbers(), ["INQ/26-27/0001"])
+
+    def test_saying_no_deletes_nothing(self):
+        self._pick(self.dialog.register_table, 0, 1, 2)
+        _, saved = self._answer([UI.QMessageBox.No], self.dialog._delete_inquiry)
+        self.assertEqual(len(self._numbers()), 3)
+        self.assertEqual(saved, [])
+
+    def test_blocking_several_senders_saves_the_settings_once(self):
+        self._pick(self.dialog.register_table, 0, 1)
+        _, saved = self._answer([UI.QMessageBox.Yes, UI.QMessageBox.Yes],
+                                self.dialog._delete_inquiry)
+        self.assertEqual(len(saved), 1)
+        learned = saved[0]["inquiry"]["knowledge"]["learned"]
+        self.assertEqual(learned.get("a@one.in"), "other")
+        self.assertEqual(learned.get("b@two.in"), "other")
+        self.assertNotIn("c@three.in", learned)
+
+    def test_one_row_keeps_the_one_row_wording(self):
+        self.dialog.register_table.setCurrentCell(1, 0)
+        asked, _ = self._answer([UI.QMessageBox.Yes, UI.QMessageBox.No],
+                                self.dialog._delete_inquiry)
+        self.assertIn("INQ/26-27/0002", asked[0])
+        self.assertNotIn("these", asked[0])
+        self.assertEqual(self._numbers(), ["INQ/26-27/0001", "INQ/26-27/0003"])
+
+    def test_a_row_added_by_a_check_meanwhile_survives_the_delete(self):
+        """The screen's copy is older than the file: a plain save wiped the
+        new row, and the next check gave its number out again."""
+        rows = register.load(self.paths.register_csv)
+        rows.append(register.from_message(message("Enquiry 4", "D <d@four.in>"),
+                                          rows=rows))
+        register.save(rows, self.paths.register_csv)
+        self._pick(self.dialog.register_table, 0, 1)
+        self._answer([UI.QMessageBox.Yes, UI.QMessageBox.No],
+                     self.dialog._delete_inquiry)
+        self.assertEqual(self._numbers(), ["INQ/26-27/0003", "INQ/26-27/0004"])
+
+    def _answer_after_a_refresh(self, call):
+        """Yes to everything, but the first question also does what the
+        automatic check's refresh did inside the modal's event loop: swap
+        _register_rows for fresh dicts read from the file."""
+        asked, timer_running = [], []
+
+        class Box:
+            Yes, No = UI.QMessageBox.Yes, UI.QMessageBox.No
+
+            @staticmethod
+            def question(parent, title, text, *a, **k):
+                if not asked:
+                    parent._refresh_register()
+                timer_running.append(parent._auto.isActive())
+                asked.append(text)
+                return Box.No if len(asked) > 1 else Box.Yes
+
+            @staticmethod
+            def information(*a, **k):
+                pass
+        with _Patched(UI, "QMessageBox", Box), _NoSave():
+            call()
+        return asked, timer_running
+
+    def test_a_refresh_during_the_question_still_deletes_several(self):
+        """Review F7: rows were removed by identity, so after a refresh
+        nothing matched, nothing was deleted, and it still said "deleted"."""
+        self._pick(self.dialog.register_table, 0, 2)
+        self._answer_after_a_refresh(self.dialog._delete_inquiry)
+        self.assertEqual(self._numbers(), ["INQ/26-27/0002"])
+        self.assertIn("2", self.dialog.status.text())
+
+    def test_a_refresh_during_the_question_still_deletes_one(self):
+        self.dialog.register_table.setCurrentCell(1, 0)
+        self._answer_after_a_refresh(self.dialog._delete_inquiry)
+        self.assertEqual(self._numbers(), ["INQ/26-27/0001", "INQ/26-27/0003"])
+        self.assertIn("INQ/26-27/0002", self.dialog.status.text())
+
+    def test_a_row_already_gone_is_not_reported_as_deleted(self):
+        self.dialog.register_table.setCurrentCell(1, 0)
+        rows = register.load(self.paths.register_csv)
+        register.save([rows[0], rows[2]], self.paths.register_csv)
+        self._answer_after_a_refresh(self.dialog._delete_inquiry)
+        self.assertNotIn(UI.i18n.t("{no} deleted.").replace("{no}", "INQ/26-27/0002"),
+                         self.dialog.status.text())
+        self.assertIn(UI.i18n.t("Nothing was deleted").split(":")[0],
+                      self.dialog.status.text())
+
+    def test_the_automatic_check_waits_while_the_question_is_open(self):
+        self.dialog._auto.start(60_000)
+        try:
+            self._pick(self.dialog.register_table, 0, 1)
+            _, running = self._answer_after_a_refresh(self.dialog._delete_inquiry)
+            self.assertEqual(running, [False, False])
+            self.assertTrue(self.dialog._auto.isActive())
+        finally:
+            self.dialog._auto.stop()
+
+    def test_a_ctrl_click_deselect_is_not_deleted(self):
+        """Review F8: A, B, C picked, then C ctrl-clicked off. C stays the
+        current row; the button says 2 and it is A and B that go."""
+        from PySide6.QtCore import QItemSelectionModel
+        table = self.dialog.register_table
+        self._pick(table, 2, 0, 1)
+        table.selectionModel().select(
+            table.model().index(2, 0),
+            QItemSelectionModel.Deselect | QItemSelectionModel.Rows)
+        self.dialog._label_delete("register")
+        self.assertIn("2", self.dialog._pages["register"].panel.buttons["delete"].text())
+        asked, _ = self._answer([UI.QMessageBox.Yes, UI.QMessageBox.No],
+                                self.dialog._delete_inquiry)
+        self.assertNotIn("INQ/26-27/0003", asked[0])
+        self.assertEqual(self._numbers(), ["INQ/26-27/0003"])
+
+    def _seed(self, kind):
+        worklist = CB.get_worklist()
+        rows = self.dialog._register_rows
+        worklist.append(self.folder, kind, [
+            {"message_id": f"<{kind}{n}@x>", "inquiry_no": row["Inquiry no"],
+             "from_addr": row["Email"], "subject": f"Re: Enquiry {n}",
+             "date": "2026-10-12", "intent": "accepted"}
+            for n, row in enumerate(rows, 1)])
+
+    def test_they_answered_takes_mails_off_the_list_and_keeps_the_rows(self):
+        self._seed("replies")
+        self.dialog._render_replies()
+        self.assertEqual(self.dialog.replies_table.rowCount(), 3)
+        self._pick(self.dialog.replies_table, 0, 1)
+        asked, _ = self._answer([UI.QMessageBox.Yes],
+                                lambda: self.dialog._delete_from_list("replies"))
+        self.assertEqual(len(asked), 1)
+        self.assertIn("2", asked[0])
+        self.assertEqual(self.dialog.replies_table.rowCount(), 1)
+        self.assertEqual(len(self._numbers()), 3)
+
+    def test_order_came_takes_mails_off_and_skips_ones_accepted_by_hand(self):
+        self._seed("orders")
+        rows = register.load(self.paths.register_csv)
+        rows[2]["Status"] = register.ACCEPTED
+        register.save(rows, self.paths.register_csv)
+        CB.get_worklist().resolve(self.folder, "orders", "<orders3@x>")
+        self.dialog._refresh_register()
+        self.dialog._render_orders()
+        self.assertEqual(self.dialog.orders_table.rowCount(), 3)
+        self._pick(self.dialog.orders_table, 0, 1, 2)
+        self._answer([UI.QMessageBox.Yes],
+                     lambda: self.dialog._delete_from_list("orders"))
+        # The accepted-by-hand row has no mail behind it and stays.
+        self.assertEqual(self.dialog.orders_table.rowCount(), 1)
+        self.assertEqual(len(self._numbers()), 3)
+        self.assertIn("1", self.dialog.status.text())
+
+    def test_a_list_file_held_open_says_so_plainly(self):
+        """Windows: os.replace on the worklist fails while another program
+        holds the file. That was a raw PermissionError on screen."""
+        self._seed("replies")
+        self.dialog._render_replies()
+        self._pick(self.dialog.replies_table, 0, 1)
+        worklist = CB.get_worklist()
+        said = []
+
+        def held(*_a, **_k):
+            raise PermissionError(13, "Access is denied")
+        with _Patched(worklist, "resolve_many", held), \
+                _Patched(self.dialog, "_explain", said.append):
+            self._answer([UI.QMessageBox.Yes],
+                         lambda: self.dialog._delete_from_list("replies"))
+        self.assertEqual(self.dialog.replies_table.rowCount(), 3)
+        self.assertEqual(len(said), 1)
+        self.assertIn("Nothing was taken off", said[0])
+
+    def test_saying_no_on_they_answered_keeps_the_mails(self):
+        self._seed("replies")
+        self.dialog._render_replies()
+        self._pick(self.dialog.replies_table, 0, 2)
+        self._answer([UI.QMessageBox.No],
+                     lambda: self.dialog._delete_from_list("replies"))
+        self.assertEqual(self.dialog.replies_table.rowCount(), 3)
+
+
+class PickedRowsShowOnTintedRows(unittest.TestCase):
+    """With several rows picked, a picked row has to read as picked on the
+    greens and greys, not only on a white row."""
+
+    def _paint(self, background, selected):
+        from PySide6.QtGui import QBrush, QColor, QImage, QPainter
+        from PySide6.QtWidgets import QStyle, QStyleOptionViewItem, QTableWidget, QTableWidgetItem
+        table = QTableWidget(1, 2)
+        item = QTableWidgetItem("x")
+        item.setBackground(QBrush(QColor(background)))
+        table.setItem(0, 0, item)
+        delegate = UI._TintedCellDelegate(table)
+        option = QStyleOptionViewItem()
+        option.rect = table.visualRect(table.model().index(0, 0))
+        option.rect.setRect(0, 0, 60, 20)
+        if selected:
+            option.state |= QStyle.State_Selected
+        image = QImage(60, 20, QImage.Format_ARGB32)
+        image.fill(QColor("white"))
+        painter = QPainter(image)
+        delegate.paint(painter, option, table.model().index(0, 0))
+        painter.end()
+        return image
+
+    def test_a_picked_light_row_is_clearly_darker_and_has_a_bar(self):
+        from PySide6.QtGui import QColor
+        for tint in ("#f5f5f7", "#e5e5ea", "#dcfce7"):
+            plain = self._paint(tint, False)
+            picked = self._paint(tint, True)
+            middle_plain = QColor(plain.pixel(40, 2)).lightness()
+            middle_picked = QColor(picked.pixel(40, 2)).lightness()
+            self.assertGreaterEqual(middle_plain - middle_picked, 25, tint)
+            # The bar down the left edge is in the row's tint, on the
+            # charcoal fill (13 Oct, round 3: it was dark on the tint).
+            bar = QColor(picked.pixel(1, 10)).lightness()
+            self.assertGreaterEqual(bar - middle_picked, 100, tint)
+
+    def test_a_picked_dark_row_is_lighter(self):
+        from PySide6.QtGui import QColor
+        plain = self._paint("#27272a", False)
+        picked = self._paint("#27272a", True)
+        middle = QColor(picked.pixel(40, 2)).lightness()
+        self.assertGreater(middle, QColor(plain.pixel(40, 2)).lightness())
+        self.assertGreaterEqual(middle - QColor(picked.pixel(1, 10)).lightness(),
+                                100)
 
 
 if __name__ == "__main__":

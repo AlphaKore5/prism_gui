@@ -620,14 +620,18 @@ class ThreadsAndStatuses(unittest.TestCase):
                                  "Message-ID": "<b2@shaktiauto.in>"})
         self.assertIs(register.find_by_thread([row], reply), row)
 
-    def test_a_phone_reply_that_breaks_the_thread_still_matches_by_sender(self):
+    def test_a_phone_reply_that_breaks_the_thread_gets_a_new_number(self):
+        """The owner's rule (2026-10-13): a mail joins an earlier inquiry only
+        when it is clearly a reply. No Re:, no thread headers and no number
+        named is a fresh subject, so a new inquiry, even with a quotation
+        open for that customer (review F3)."""
         row = register.from_message(message())
         row["Status"] = register.QUOTED
         orphan = message(subject="best price?",
                          headers={"Message-ID": "<zz@phone.local>"})
         orphan.in_reply_to = ""
         orphan.references = []
-        self.assertIs(register.find_by_thread([row], orphan), row)
+        self.assertIsNone(register.find_by_thread([row], orphan))
 
     def test_a_closed_inquiry_does_not_swallow_new_business(self):
         row = register.from_message(message())
@@ -1410,13 +1414,15 @@ class TheDailyLoop(unittest.TestCase):
     def test_a_locked_register_does_not_advance_the_bookmark(self):
         """Otherwise the mail Prism could not record is never seen again."""
         k = triage.Knowledge(customers={"shaktiauto.in"})
-        real_save = register.save
-        register.save = lambda rows, path: (_ for _ in ()).throw(
+        # _write is the one place every register save goes through
+        # (save, save_merged and the check's save_changes).
+        real_save = register._write
+        register._write = lambda rows, path: (_ for _ in ()).throw(
             register.RegisterLocked("close Excel"))
         try:
             result = self._run([message()], knowledge=k)
         finally:
-            register.save = real_save
+            register._write = real_save
         self.assertIn("close Excel", result.error)
         self.assertEqual(result.state.last_uid, 0)
 

@@ -1279,10 +1279,23 @@ class Toolbar(QFrame):
         self.setObjectName("toolbar")
         self.setAttribute(Qt.WA_StyledBackground, True)
         self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self._row = QHBoxLayout(self)
-        self._row.setContentsMargins(theme.SPACE_3, theme.SPACE_2,
-                                     theme.SPACE_3, theme.SPACE_2)
+        self._rows = QVBoxLayout(self)
+        self._rows.setContentsMargins(theme.SPACE_3, theme.SPACE_2,
+                                      theme.SPACE_3, theme.SPACE_2)
+        self._rows.setSpacing(theme.SPACE_2)
+        self._row = QHBoxLayout()
         self._row.setSpacing(theme.SPACE_2)
+        self._rows.addLayout(self._row)
+
+    def new_row(self):
+        """Start a second line in the same strip: everything add()ed from
+        here on goes under the first line. For a toolbar whose controls do
+        not fit one line at the app's default width (the inquiry register:
+        range, search, four chips and two buttons) — squeezing them into one
+        line cut the search box to "Fin…"."""
+        self._row = QHBoxLayout()
+        self._row.setSpacing(theme.SPACE_2)
+        self._rows.addLayout(self._row)
 
     def add(self, widget: QWidget, stretch: int = 0) -> QWidget:
         self._row.addWidget(widget, stretch)
