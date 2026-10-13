@@ -2036,7 +2036,7 @@ class LeadsCockpit(QWidget):
         fits). Save never folds: it is Apollo's first action, and the one that
         moves people from Net New to Saved. Nor does Remove — the owner asked
         for it by name — until the bar is narrower than anything else can
-        absorb (5): the floating Ask-Lumi pill takes the right 300px of the bar
+        absorb (5): the old floating Ask-Lumi pill took the right 300px of the bar
         (_launcher_inset), and on a 1366px window that left less than Save,
         Remove, More and the primary need, so their labels were crushed to
         stubs ("emov", "i seq"). Folded, Remove is still in More, by name. From
@@ -2069,28 +2069,36 @@ class LeadsCockpit(QWidget):
         return m.left() + m.right() + sum(items) + lay.spacing() * len(items)
 
     @staticmethod
-    def _inset_past_launcher(room: int) -> int:
-        """How much of the bar's right edge the Ask-Lumi pill covers, given
-        `room` px between the bar and the window's right edge, plus a gap."""
-        return max(0, theme.LAUNCHER_REACH + theme.SPACE_2 - room)
+    def _inset_past_launcher(room: int, reach: int) -> int:
+        """How much of the bar's right edge Lumi's button covers, given `room`
+        px between the bar and the window's right edge and the button's
+        `reach` in from that edge, plus a gap."""
+        return max(0, reach + theme.SPACE_2 - room)
 
     def _launcher_inset(self) -> int:
-        """How far the bulk bar's contents stop short of its right edge so the
-        floating Ask-Lumi pill (theme.LAUNCHER_REACH) does not sit on top of
-        them. The bar is pinned to the foot of the results, exactly where the
-        pill floats, and at every window size it covered Find e-mails, More and
-        the primary Add to sequence (12-Oct-2026, real-window renders at 1920,
-        1536 and 1366). 0 outside the real window — there is no pill in a test
-        or a dialog — and while the bar is not showing."""
+        """How far the bulk bar's contents stop short of its right edge so
+        Lumi's edge button does not sit on top of them. The button used to be
+        a 285 px pill floating exactly where this bar is pinned, and it covered
+        Find e-mails, More and Add to sequence at every window size (12-Oct-
+        2026). It is now a ~44 px round button that rests above a footer row
+        (theme.LUMI_REST_FROM_BOTTOM), so this is 0 unless the owner has
+        dragged it down into the bar's band — then the bar gives way by the
+        button's real width, read off the button itself. 0 outside the real
+        window and while the bar is not showing."""
         win = self.window()
         bar = self._bulk_bar_w
         if not isinstance(win, QMainWindow) or not self._bulk.isVisible():
             return 0
         central = win.centralWidget() or win
-        if bar.mapTo(central, bar.rect().bottomLeft()).y() < central.height() - theme.LAUNCHER_BAND:
-            return 0                        # the bar sits above the pill's band
-        room = win.width() - (bar.mapTo(win, bar.rect().topRight()).x() + 1)
-        return self._inset_past_launcher(room)
+        button = central.findChild(QWidget, "lumiEdgeButton")
+        if button is None or button.isHidden():
+            return 0
+        g = button.geometry()
+        top = bar.mapTo(central, QPoint(0, 0)).y()
+        if g.bottom() < top or g.top() > top + bar.height() - 1:
+            return 0                        # the button is above or below the bar
+        room = central.width() - (bar.mapTo(central, bar.rect().topRight()).x() + 1)
+        return self._inset_past_launcher(room, central.width() - g.x())
 
     def _fit_bulk(self) -> None:
         """Show the bulk actions that fit; fold the rest into More. Off screen

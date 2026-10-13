@@ -224,7 +224,7 @@ def quotation_files(quote, settings: dict, folder) -> tuple[str, str]:
 # check saves (INQ-26-27-0005_mail_2026-10-12_0914.eml). Any LETTERS-yy-yy-n
 # used to count, which hid a customer's own PO-26-27-0012.pdf saved in a
 # folder before attachments carried the inquiry-number prefix.
-_OURS = re.compile(r"^(QTN-\d{2}-\d{2}-\d+\.(pdf|csv|xlsx)(\.part)?"
+_OURS = re.compile(r"^(QTN-\d{2}-\d{2}-\d+(-R\d+)?\.(pdf|csv|xlsx)(\.part)?"
                    r"|[\w-]*_mail_(\d{4}-\d{2}-\d{2}_\d{4}|undated)(-\d+)?\.eml)$",
                    re.I)
 
@@ -245,7 +245,12 @@ def attachment_for(csv_path: str, pdf_path: str) -> dict:
 
 # ── the register, for Excel ───────────────────────────────────────────────────
 _DATE_COLUMNS = ("Date received", "Quotation date", "Last contact", "PO date")
-_MONEY_COLUMNS = ("Quotation value", "Order value")
+_MONEY_COLUMNS = ("Quotation value", "Order value", "Their ask")
+# The pipeline's six register columns (engine register.PIPELINE_COLUMNS),
+# listed here so their Excel headers reach the i18n catalogue: the engine
+# tree is not scanned. Named LABELS so extract_strings reads it.
+LABELS = ("Revision", "Price history", "Their ask", "Turn", "No quotation",
+          "Proforma")
 _TEXT_COLUMNS = ("Phone", "Inquiry no", "Quotation no", "PO number")
 _HIDDEN = ("Thread",)
 
@@ -339,30 +344,12 @@ def _as_text(cell) -> None:
 
 
 # Status spellings from hand-kept or imported sheets, read as Prism's own.
-_STATUS_ALIASES = {
-    "won": "Converted", "order": "Converted", "order received": "Converted",
-    "lost": "Not converted", "not converted": "Not converted",
-    "follow up": "Following up", "followup": "Following up",
-    "following-up": "Following up", "negotiation": "Negotiating",
-    "quote sent": "Quoted", "quotation sent": "Quoted",
-}
-
-
 def status_key(text) -> str:
-    """The register status a cell means, for colouring: Prism's own spelling
-    in any case, a few common hand-typed words, and blank as New (an inquiry
-    nobody has touched — the engine reads it the same way). Anything else is
-    returned as typed and gets no colour. One function for the screen and
-    the Excel copy, so the two always tint a row alike."""
-    raw = " ".join(str(text or "").split())
-    if not raw:
-        return "New"
-    folded = raw.casefold()
-    for status in ("New", "Quoted", "Following up", "Negotiating", "Accepted",
-                   "Converted", "Not converted"):
-        if folded == status.casefold():
-            return status
-    return _STATUS_ALIASES.get(folded, raw)
+    """The register status a cell means, for colouring. The engine's
+    register.normalise_status — the same reader the board's stage_of uses
+    (review R8), so the Client file, the Excel copy and the board always
+    agree. Anything unrecognised is returned as typed and gets no colour."""
+    return CB.get_register().normalise_status(text)
 
 
 def legend() -> list[tuple[str, str]]:

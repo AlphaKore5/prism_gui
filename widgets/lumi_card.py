@@ -1,16 +1,17 @@
 """Lumi Help Center & Floating Assistant.
 
-Recreates the Lumi Help Center card popup and floating launcher, featuring:
+Recreates the Lumi Help Center card popup and its edge launcher, featuring:
   • Sprite-animated Lumi axolotl (8-frame spritesheet with waving and idle loops)
   • Welcome View with mint-gradient banner, wavy cloud, pill search bar, and 3 action cards
   • Conversational Chat View with rich markdown rendering, action chips, and back navigation
-  • Persistent floating dark pill launcher with circular Lumi avatar and online status dot
+  • LumiEdgeButton: a small round launcher docked to the window's right edge
+    (Android-style accessibility button) — drag along the edge, tuck away
 """
 from __future__ import annotations
 
+import json
 import math
 import os
-import random
 from typing import Optional
 
 from PySide6.QtCore import (
@@ -18,12 +19,12 @@ from PySide6.QtCore import (
     QVariantAnimation, Signal,
 )
 from PySide6.QtGui import (
-    QBrush, QColor, QCursor, QFont, QIcon, QLinearGradient, QPainter,
+    QColor, QFont, QFontMetrics, QIcon, QLinearGradient, QPainter,
     QPainterPath, QPen, QPixmap, QTransform,
 )
 from PySide6.QtWidgets import (
-    QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QScrollArea, QSizePolicy, QStackedLayout, QVBoxLayout, QWidget,
+    QApplication, QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel, QLineEdit,
+    QMenu, QPushButton, QScrollArea, QSizePolicy, QStackedLayout, QVBoxLayout, QWidget,
 )
 
 import i18n
@@ -681,662 +682,515 @@ class LumiCard(QFrame):
             self._support_panel._open_contact()
 
 
-# ── FLOATING LAUNCHER PILL ───────────────────────────────────────────────────
-# ── PARTICLE FX: RIPPLES, WATER DROPS & CONFETTI ───────────────────────────
-class _ConfettiParticle:
-    """Festive confetti ribbon/square particle for celebrations (3.2)."""
-    def __init__(self, x: float, y: float):
-        self.x = x
-        self.y = y
-        self.vx = random.uniform(-3.5, 3.5)
-        self.vy = random.uniform(-6.5, -3.0)  # initial upward burst
-        self.rot = random.uniform(0, 360)
-        self.vrot = random.uniform(-14.0, 14.0)
-        self.w = random.uniform(4.0, 7.0)
-        self.h = random.uniform(5.0, 9.0)
-        self.alpha = 255.0
-        colors = [
-            QColor(45, 212, 191),   # mint
-            QColor(245, 158, 11),   # gold
-            QColor(236, 72, 153),   # rose/pink
-            QColor(139, 92, 246),   # violet
-            QColor(56, 189, 248),   # sky blue
-            QColor(34, 197, 94),    # lime
-        ]
-        self.color = random.choice(colors)
+# ── LUMI EDGE BUTTON (Android-style floating accessibility button) ───────────
+# The launcher used to be a 260-285 px dark pill reading "Need help? Ask Lumi
+# anything." with a mascot walking on an 88 px stage above it. It sat on cards,
+# table rows and footer buttons in the bottom-right of every screen, and the
+# screens reserved 120 px under their last row to make room for it. The owner
+# (14 Oct 2026): "make it like an accessibility bar, just like Android has".
+# So it is now a small round face docked to the right edge: half see-through at
+# rest, opaque under the cursor or focus, a short "Ask Lumi" label sliding out
+# to its left on hover, draggable up and down the edge, and tuckable into a
+# slim tab. It is a plain child widget of the window — no top-level window, no
+# WA_TranslucentBackground — so it renders the same on Windows and macOS.
 
-    def update(self) -> bool:
-        self.x += self.vx
-        self.y += self.vy
-        self.vy += 0.28
-        self.vx *= 0.98
-        self.rot += self.vrot
-        self.alpha = max(0.0, self.alpha - 5.5)
-        return self.alpha > 0 and self.y < 120
+_LUMI_TEAL = "#18c7c1"           # Lumi's own ring colour (the avatar's rim)
+_PREFS_FILE = "gui_lumi_button.json"
 
 
-class _Ripple:
-    """Expanding aquatic ripple ring."""
-    def __init__(self, x: float, y: float, max_r: float = 38.0, color: Optional[QColor] = None):
-        self.x = x
-        self.y = y
-        self.radius = 6.0
-        self.max_r = max_r
-        self.alpha = 220.0
-        self.color = color or QColor(45, 212, 191)
-
-    def update(self) -> bool:
-        self.radius += 2.2
-        self.alpha = max(0.0, self.alpha - 14.0)
-        return self.radius < self.max_r and self.alpha > 0
+def _effects_on() -> bool:
+    return (os.environ.get("PRISM_EFFECTS", "1") != "0"
+            and os.environ.get("QT_QPA_PLATFORM") != "offscreen")
 
 
-class _WaterDrop:
-    """Tiny splash water droplet particle with physics arc."""
-    def __init__(self, x: float, y: float, vx: float, vy: float):
-        self.x = x
-        self.y = y
-        self.vx = vx
-        self.vy = vy
-        self.alpha = 240.0
-        self.r = random.uniform(2.0, 3.5)
-
-    def update(self) -> bool:
-        self.x += self.vx
-        self.y += self.vy
-        self.vy += 0.45  # gravity
-        self.alpha = max(0.0, self.alpha - 12.0)
-        return self.alpha > 0 and self.y < 120
+def _prefs_path() -> str:
+    return paths.user_dir(_PREFS_FILE)
 
 
-# ── FLOATING LAUNCHER PILL WITH ANIMATED MASCOT LOCOMOTION ───────────────────
-class LumiLauncherPill(QWidget):
-    """The floating dark pill launcher with Lumi's avatar badge and walking mascot companion."""
+def load_button_prefs() -> dict:
+    """Where the owner left the button: {"from_bottom": int|None,
+    "tucked": bool, "welcomed": bool}. A missing or hand-mangled file is the
+    default spot, never an error."""
+    out = {"from_bottom": None, "tucked": False, "welcomed": False}
+    try:
+        with open(_prefs_path(), "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return out
+    if not isinstance(data, dict):
+        return out
+    fb = data.get("from_bottom")
+    if isinstance(fb, int) and not isinstance(fb, bool) and fb >= 0:
+        out["from_bottom"] = fb
+    out["tucked"] = data.get("tucked") is True
+    out["welcomed"] = data.get("welcomed") is True
+    return out
+
+
+def save_button_prefs(prefs: dict) -> None:
+    """Atomic write (temp file + os.replace, like favorites.save) into the
+    user's own Prism folder. UI state is never worth a crash: failures are
+    swallowed and the button simply forgets."""
+    path = _prefs_path()
+    tmp = f"{path}.{os.getpid()}.tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"from_bottom": prefs.get("from_bottom"),
+                       "tucked": bool(prefs.get("tucked")),
+                       "welcomed": bool(prefs.get("welcomed"))}, f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+class LumiEdgeButton(QWidget):
+    """Lumi's launcher: a small round button docked to the host's right edge.
+
+    Emits `toggle_requested` on click, Enter or Space — the same signal the old
+    pill emitted, so LumiOverlay opens and closes the card exactly as before.
+    """
 
     toggle_requested = Signal()
+    tucked_changed = Signal(bool)
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setCursor(Qt.PointingHandCursor)
-        self._stage_h = 88
-        self.setFixedHeight(self._stage_h + 56)
-        self.setMinimumWidth(260)
-        self.setMaximumWidth(285)
+    _RING = 3            # room around the face for the focus ring
+
+    def __init__(self, host: QWidget, persist: bool = True):
+        super().__init__(host)
+        self._host = host
+        self._persist = persist
+        self.setObjectName("lumiEdgeButton")
         self.setAttribute(Qt.WA_Hover, True)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setCursor(Qt.PointingHandCursor)
+        self.setAccessibleName(i18n.t("Ask Lumi"))
 
-        self._frames: list[QPixmap] = []
-        self._walk_frames: list[QPixmap] = []
-        self._idle_pix = QPixmap()
-        self._blink_pix = QPixmap()
-        self._load_spritesheet()
+        prefs = load_button_prefs() if persist else {
+            "from_bottom": None, "tucked": False, "welcomed": True}
+        self._from_bottom: Optional[int] = prefs["from_bottom"]
+        self._tucked = bool(prefs["tucked"])
+        self._welcomed = bool(prefs["welcomed"])
 
-        # Locomotion & State
-        # States: "idle", "walking", "sitting", "waving", "shaking", "leaping", "working", "celebrating", "typing"
-        self._state = "walking"
-        self._mascot_x = 50.0
-        self._target_x = 150.0
-        self._facing_left = False
-        self._walk_step = 0
-        self._stride_dist = 0.0
-        self._head_pitch = 0.0
-        self._target_pitch = 0.0
-        self._state_timer = 0
-        self._shake_phase = 0
-        self._leap_progress = 0.0
+        self._hover = False
         self._card_is_open = False
+        self._press_at: Optional[QPoint] = None   # host coords of the press
+        self._press_y = 0
+        self._dragging = False
+        self._pushed = False                      # dragged against the edge
+        self._pulse = 0.0
+        self._pulse_anim: Optional[QVariantAnimation] = None
+        self._label_anim: Optional[QVariantAnimation] = None
+        self._face = QPixmap(paths.resource("assets", "lumi", "lumi_avatar.png"))
+        self._face_cache: dict = {}
 
-        # Specialized modes (3.2 Celebration, 3.3 Worker Running, 3.5 Typing Sync)
-        self._celebrate_timer = 0
-        self._worker_run_ticks = 0
-        self._typing_timer = 0
-        self._typing_bob = 0.0
+        self._label = QLabel(i18n.t("Ask Lumi"), host)
+        self._label.setObjectName("lumiEdgeLabel")
+        self._label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        self._label.setAlignment(Qt.AlignCenter)
+        self._label.setStyleSheet(
+            f"QLabel#lumiEdgeLabel {{ background: {theme.NEUTRAL[900]};"
+            f" color: #ffffff; font-family: '{theme.FONT_BODY}';"
+            " font-size: 12px; font-weight: 600;"
+            f" padding: {theme.SPACE_1}px {theme.SPACE_3}px;"
+            f" border-radius: {theme.R_CONTROL}px; }}")
+        self._label.hide()
 
-        # Visual FX
-        self._ripples: list[_Ripple] = []
-        self._droplets: list[_WaterDrop] = []
-        self._confetti: list[_ConfettiParticle] = []
+        self._diam = self._diameter()
+        self._sync_text()
+        self.reposition()
 
-        self._idle_seq = [0, 1, 2, 3, 2, 1]
-        self._waving_seq = [4, 5, 6, 7, 6, 5]
+    # ── geometry ─────────────────────────────────────────────────────────
+    def _diameter(self) -> int:
+        """From the font's line height, not a pixel guess: ~2.4 lines, held
+        between theme.LUMI_BUTTON_MIN and _MAX. Logical pixels, so a 150 %
+        Windows display and a retina Mac get the same size on screen."""
+        d = round(QFontMetrics(self.font()).height() * 2.4)
+        return max(theme.LUMI_BUTTON_MIN, min(theme.LUMI_BUTTON_MAX, d))
 
-        # Top stage where Lumi perches & walks comfortably (compact 88px stage)
-        # Bottom 56px: dark pill frame (less horizontal, more vertical rounded pill)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, self._stage_h, 0, 0)
-        layout.setSpacing(0)
+    def diameter(self) -> int:
+        return self._diam
 
-        pill = QFrame(self)
-        pill.setObjectName("lumiPillFrame")
-        pill.setFixedHeight(56)
-        pill.setStyleSheet(
-            "QFrame#lumiPillFrame {"
-            "  background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
-            "    stop:0 rgba(28, 33, 46, 0.82),"
-            "    stop:0.45 rgba(18, 22, 32, 0.86),"
-            "    stop:1.0 rgba(10, 13, 20, 0.92));"
-            "  border: 1px solid rgba(255, 255, 255, 0.18);"
-            "  border-top: 1.5px solid rgba(255, 255, 255, 0.38);"
-            "  border-radius: 28px;"
-            "}"
-            "QFrame#lumiPillFrame:hover {"
-            "  background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
-            "    stop:0 rgba(36, 44, 60, 0.88),"
-            "    stop:0.45 rgba(22, 28, 40, 0.92),"
-            "    stop:1.0 rgba(14, 18, 28, 0.96));"
-            "  border: 1px solid rgba(45, 212, 191, 0.65);"
-            "  border-top: 1.5px solid rgba(94, 234, 212, 0.90);"
-            "}"
-        )
-        pill_shadow = QGraphicsDropShadowEffect(pill)
-        pill_shadow.setBlurRadius(24)
-        pill_shadow.setColor(QColor(0, 0, 0, 95))
-        pill_shadow.setOffset(0, 6)
-        pill.setGraphicsEffect(pill_shadow)
+    def is_tucked(self) -> bool:
+        return self._tucked
 
-        p_box = QHBoxLayout(pill)
-        p_box.setContentsMargins(14, 4, 8, 4)
-        p_box.setSpacing(8)
+    def from_bottom(self) -> int:
+        if self._from_bottom is None:
+            return theme.LUMI_REST_FROM_BOTTOM
+        return self._from_bottom
 
-        text_lbl = QLabel(i18n.t("Need help? Ask Lumi anything."))
-        text_lbl.setStyleSheet(
-            "font-family: 'Segoe UI', -apple-system, sans-serif; font-size: 11px; font-weight: 600; color: rgba(248, 250, 252, 0.95); letter-spacing: 0.2px; background: transparent;"
-        )
-        text_lbl.setWordWrap(False)
-        p_box.addWidget(text_lbl, stretch=1)
+    def _clamp_y(self, y: int) -> int:
+        h = self._host.height()
+        top = theme.LUMI_EDGE_GAP
+        bottom = max(top, h - self._diam - theme.LUMI_EDGE_GAP)
+        return max(top, min(bottom, int(y)))
 
-        # Avatar badge at right
-        avatar_wrap = QWidget()
-        avatar_wrap.setFixedSize(38, 38)
-        a_layout = QVBoxLayout(avatar_wrap)
-        a_layout.setContentsMargins(0, 0, 0, 0)
+    def _x(self) -> int:
+        w = self._host.width()
+        if self._tucked:
+            return w - theme.LUMI_TAB_W
+        return w - theme.LUMI_EDGE_GAP - self._diam
 
-        self._avatar_btn = QLabel(avatar_wrap)
-        av_pix = QPixmap(paths.resource("assets", "lumi", "lumi_avatar.png"))
-        if not av_pix.isNull():
-            self._avatar_btn.setPixmap(av_pix.scaled(34, 34, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        self._avatar_btn.setFixedSize(36, 36)
-        self._avatar_btn.setStyleSheet(
-            "border: 2px solid rgba(45, 212, 191, 0.9); border-radius: 18px; background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(45, 212, 191, 0.22), stop:1 rgba(15, 23, 42, 0.88));"
-        )
+    def reposition(self):
+        """Dock to the right edge at the remembered height, clamped inside
+        the host — called on every host resize and DPI/font change."""
+        d = self._diam
+        y = self._clamp_y(self._host.height() - self.from_bottom() - d)
+        w = theme.LUMI_TAB_W if self._tucked else d
+        self.setGeometry(self._x(), y, w, d)
+        self.raise_()
+        if self._label.isVisible():
+            self._place_label(animate=False)
 
-        dot = QLabel(avatar_wrap)
-        dot.setFixedSize(10, 10)
-        dot.move(26, 1)
-        dot.setStyleSheet(
-            "background: #22c55e; border: 1.5px solid rgba(10, 13, 20, 0.95); border-radius: 5px;"
-        )
-        p_box.addWidget(avatar_wrap)
+    # ── state ────────────────────────────────────────────────────────────
+    def set_card_open(self, is_open: bool):
+        self._card_is_open = bool(is_open)
+        self.update()
 
-        layout.addWidget(pill)
+    def set_tucked(self, tucked: bool):
+        tucked = bool(tucked)
+        if tucked == self._tucked:
+            return
+        self._tucked = tucked
+        self._hide_label()
+        self._sync_text()
+        self.reposition()
+        self.update()
+        self._save()
+        self.tucked_changed.emit(tucked)
 
-        # Make entire pill and contents reliably clickable
-        pill.mouseReleaseEvent = lambda e: self._on_clicked(e)
-        text_lbl.mouseReleaseEvent = lambda e: self._on_clicked(e)
-        avatar_wrap.mouseReleaseEvent = lambda e: self._on_clicked(e)
+    def move_to_bottom(self):
+        """Back to the default spot, untucked."""
+        self._from_bottom = None
+        if self._tucked:
+            self._tucked = False
+            self._sync_text()
+            self.tucked_changed.emit(False)
+        self.reposition()
+        self.update()
+        self._save()
 
-        # Tick timer for locomotion cycle and particle physics
-        self._tick_timer = QTimer(self)
-        self._tick_timer.timeout.connect(self._on_tick)
-        self._tick_timer.start(50)
-
-    def _load_spritesheet(self):
-        sheet_path = paths.resource("assets", "lumi", "lumi_spritesheet.png")
-        if os.path.exists(sheet_path):
-            sheet = QPixmap(sheet_path)
-            if not sheet.isNull():
-                fw = sheet.width() // 4
-                fh = sheet.height() // 2
-                for r in range(2):
-                    for c in range(4):
-                        self._frames.append(sheet.copy(c * fw, r * fh, fw, fh))
-
-        # Dedicated walk cycle frames (both legs articulated, natural steps)
-        walk_dir = paths.resource("assets", "lumi", "walk")
-        for i in range(6):
-            wp = os.path.join(walk_dir, f"walk_{i}.png")
-            if os.path.exists(wp):
-                pix = QPixmap(wp)
-                if not pix.isNull():
-                    self._walk_frames.append(pix)
-
-        idle_p = os.path.join(walk_dir, "idle_0.png")
-        if os.path.exists(idle_p):
-            self._idle_pix = QPixmap(idle_p)
-
-        blink_p = os.path.join(walk_dir, "idle_blink.png")
-        if os.path.exists(blink_p):
-            self._blink_pix = QPixmap(blink_p)
-
-    def _on_clicked(self, event):
-        if event.button() == Qt.LeftButton:
+    def activate(self):
+        """What a click, Enter or Space does: a tucked tab comes back; the
+        button asks for Lumi."""
+        if self._tucked:
+            self.set_tucked(False)
+        else:
             self.toggle_requested.emit()
 
-    def trigger_celebration(self, duration_ms: int = 3500):
-        """3.2 Celebration & Confetti burst (explicit achievements, quotes, completed tasks)."""
-        self._state = "celebrating"
-        self._celebrate_timer = int(duration_ms / 50)
-        mx = self._mascot_x + 27
-        my = float(self._stage_h) - 15.0
-        for _ in range(36):
-            self._confetti.append(_ConfettiParticle(mx, my))
-        self.update()
+    def _sync_text(self):
+        if self._tucked:
+            self.setToolTip(i18n.t("Bring Lumi back"))
+            self.setAccessibleDescription(i18n.t("Lumi is tucked away. Press to bring the button back."))
+        else:
+            self.setToolTip(i18n.t("Ask Lumi — drag up or down to move, right-click to tuck away"))
+            self.setAccessibleDescription(i18n.t("Opens Lumi, Prism’s help."))
 
-    def on_user_typing(self):
-        """3.5 Typing Sync — reacts to user typing keystrokes."""
-        if self._card_is_open or self._state in ("leaping", "shaking", "celebrating"):
+    def _save(self):
+        if self._persist:
+            save_button_prefs({"from_bottom": self._from_bottom,
+                               "tucked": self._tucked,
+                               "welcomed": self._welcomed})
+
+    # ── the "Ask Lumi" label ─────────────────────────────────────────────
+    def _label_target(self):
+        self._label.adjustSize()
+        lw, lh = self._label.width(), self._label.height()
+        x = self.x() - theme.SPACE_2 - lw
+        y = self.y() + (self.height() - lh) // 2
+        return max(0, x), max(0, y)
+
+    def _place_label(self, animate: bool):
+        x, y = self._label_target()
+        if self._label_anim is not None:
+            self._label_anim.stop()
+        if not animate or not _effects_on():
+            self._label.move(x, y)
             return
-        self._typing_timer = 24  # ~1.2 seconds of focused attention
-        self._typing_bob = 3.8
-        self._state = "typing"
-        self.update()
-
-    def trigger_dive_and_splash(self):
-        """Called when card closes: creates splash and mascot emerges on top of the pill."""
-        self._card_is_open = False
-        self._state = "shaking"
-        self._shake_phase = 18
-        self._mascot_x = max(40.0, float(self.width() - 95))
-        self._facing_left = True
-
-        # Spawn ripples at the avatar location
-        ax = float(self.width() - 32)
-        ay = float(self._stage_h) + 28.0
-        self._ripples.append(_Ripple(ax, ay, max_r=32.0))
-        self._ripples.append(_Ripple(ax, ay, max_r=20.0))
-
-        # Spawn water droplets
-        for _ in range(8):
-            vx = random.uniform(-2.5, 2.5)
-            vy = random.uniform(-5.5, -2.0)
-            self._droplets.append(_WaterDrop(ax, ay - 10, vx, vy))
-
-        self.update()
-
-    def trigger_leap_and_pop(self):
-        """Called when card opens: mascot leaps upward into the card."""
-        self._state = "leaping"
-        self._leap_progress = 0.0
-
-        mx = self._mascot_x + 27
-        my = float(self._stage_h)
-        self._ripples.append(_Ripple(mx, my, max_r=30.0))
-
         anim = QVariantAnimation(self)
-        anim.setDuration(280)
+        anim.setDuration(140)
+        anim.setStartValue(x + theme.SPACE_3)
+        anim.setEndValue(x)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.valueChanged.connect(lambda v: self._label.move(int(v), y))
+        self._label_anim = anim
+        anim.start()
+
+    def _show_label(self):
+        if self._tucked or self._dragging or self._card_is_open:
+            return
+        was = self._label.isVisible()
+        self._label.show()
+        self._label.raise_()
+        self.raise_()
+        self._place_label(animate=not was)
+
+    def _hide_label(self):
+        if self._label_anim is not None:
+            self._label_anim.stop()
+        self._label.hide()
+
+    def label_widget(self) -> QLabel:
+        return self._label
+
+    # ── first run / celebration: one gentle pulse instead of the mascot ──
+    def pulse(self, times: int = 2):
+        if not _effects_on() or self._tucked:
+            return
+        if self._pulse_anim is not None:
+            self._pulse_anim.stop()
+        anim = QVariantAnimation(self)
+        anim.setDuration(900)
         anim.setStartValue(0.0)
         anim.setEndValue(1.0)
-        anim.setEasingCurve(QEasingCurve.OutQuad)
+        anim.setLoopCount(max(1, times))
+        anim.setEasingCurve(QEasingCurve.OutCubic)
 
-        def _step(val):
-            self._leap_progress = float(val)
+        def _step(v):
+            self._pulse = float(v)
             self.update()
 
         def _done():
-            self._card_is_open = True
-            self._state = "idle"
+            self._pulse = 0.0
             self.update()
 
         anim.valueChanged.connect(_step)
         anim.finished.connect(_done)
+        self._pulse_anim = anim
         anim.start()
 
-    def _on_tick(self):
-        # 1. Update particles
-        self._ripples = [r for r in self._ripples if r.update()]
-        self._droplets = [d for d in self._droplets if d.update()]
-        self._confetti = [c for c in self._confetti if c.update()]
+    def welcome_once(self):
+        """The first time Prism shows the button for this user, it pulses
+        twice so a newcomer notices it — the job the walking mascot did."""
+        if self._welcomed or not _effects_on():
+            return
+        self._welcomed = True
+        self._save()
+        QTimer.singleShot(1200, self.pulse)
 
-        # Decay typing bounce
-        if self._typing_bob > 0:
-            self._typing_bob = max(0.0, self._typing_bob - 0.7)
+    # Kept for LumiOverlay callers of the old pill.
+    def trigger_celebration(self, duration_ms: int = 3500):
+        self.pulse(1)
 
-        # 2. Mouse tracking: follow mouse position and head pitch
-        try:
-            cur_global = QCursor.pos()
-            local_pt = self.mapFromGlobal(cur_global)
-            head_cx = self._mascot_x + 27.0
-            head_cy = float(self._stage_h) - 45.0
-            dx = float(local_pt.x()) - head_cx
-            dy = float(local_pt.y()) - head_cy
+    def on_user_typing(self):
+        pass
 
-            # Smooth head pitch tracking (looking up / down at mouse)
-            raw_pitch = math.degrees(math.atan2(dy, max(35.0, abs(dx))))
-            self._target_pitch = max(-20.0, min(10.0, raw_pitch * 0.45))
-            self._head_pitch += (self._target_pitch - self._head_pitch) * 0.22
+    # ── events ───────────────────────────────────────────────────────────
+    def event(self, ev):
+        if ev.type() in (QEvent.FontChange, QEvent.DevicePixelRatioChange,
+                         QEvent.ScreenChangeInternal):
+            self._diam = self._diameter()
+            self._face_cache.clear()
+            self.reposition()
+            self.update()
+        return super().event(ev)
 
-            # Turn body to face mouse when idle, sitting or waving
-            if self._state in ("idle", "sitting", "waving"):
-                if dx < -20.0:
-                    self._facing_left = True
-                elif dx > 20.0:
-                    self._facing_left = False
-        except Exception:
-            pass
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self.welcome_once()
 
-        # 3. Check worker activity across Prism
-        # Only persistent background workers (> 2.0s) enter working runner mode.
-        # Transient sub-second workers (licensing, Gerber/STEP check, plan route setup)
-        # do NOT trigger working mode and NEVER trigger celebratory confetti!
-        is_working = False
-        try:
-            import workers
-            is_working = bool(workers._running)
-        except Exception:
-            pass
+    def enterEvent(self, ev):
+        self._hover = True
+        self._show_label()
+        self.update()
+        super().enterEvent(ev)
 
-        if is_working:
-            self._worker_run_ticks += 1
-            if self._worker_run_ticks >= 40 and self._state not in ("leaping", "shaking", "celebrating"):
-                self._state = "working"
+    def leaveEvent(self, ev):
+        self._hover = False
+        if not self.hasFocus():
+            self._hide_label()
+        self.update()
+        super().leaveEvent(ev)
+
+    def focusInEvent(self, ev):
+        self._show_label()
+        self.update()
+        super().focusInEvent(ev)
+
+    def focusOutEvent(self, ev):
+        if not self._hover:
+            self._hide_label()
+        self.update()
+        super().focusOutEvent(ev)
+
+    def keyPressEvent(self, ev):
+        if ev.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            self.activate()
+            ev.accept()
+            return
+        super().keyPressEvent(ev)
+
+    def _host_pos(self, ev) -> QPoint:
+        return self.mapTo(self._host, ev.position().toPoint())
+
+    def mousePressEvent(self, ev):
+        if ev.button() == Qt.LeftButton:
+            self._press_at = self._host_pos(ev)
+            self._press_y = self.y()
+            self._dragging = False
+            self._pushed = False
+            ev.accept()
+            return
+        super().mousePressEvent(ev)
+
+    def mouseMoveEvent(self, ev):
+        if self._press_at is None or not (ev.buttons() & Qt.LeftButton):
+            return super().mouseMoveEvent(ev)
+        self.drag_to(self._host_pos(ev))
+        ev.accept()
+
+    def mouseReleaseEvent(self, ev):
+        if ev.button() != Qt.LeftButton or self._press_at is None:
+            return super().mouseReleaseEvent(ev)
+        self.end_drag()
+        ev.accept()
+
+    def drag_to(self, at: QPoint):
+        """Follow the pointer up or down the edge (never sideways). Pulling it
+        right by more than half its width, into the edge, tucks it on release."""
+        if self._press_at is None:
+            self._press_at = QPoint(at)
+            self._press_y = self.y()
+        dx = at.x() - self._press_at.x()
+        dy = at.y() - self._press_at.y()
+        if not self._dragging:
+            if abs(dx) + abs(dy) < QApplication.startDragDistance():
+                return
+            self._dragging = True
+            self._hide_label()
+        y = self._clamp_y(self._press_y + dy)
+        self._from_bottom = max(0, self._host.height() - y - self._diam)
+        self._pushed = (not self._tucked) and dx > self._diam // 2
+        # A hint of the tuck: the face slides into the edge while pushed.
+        shift = min(dx, self._diam // 2) if self._pushed else 0
+        self.move(self._x() + max(0, shift), y)
+        self.update()
+
+    def end_drag(self):
+        """Release: a click if it never moved, otherwise snap to the edge
+        (or tuck, if it was pushed into it) and remember where."""
+        dragged, pushed = self._dragging, self._pushed
+        self._press_at = None
+        self._dragging = False
+        self._pushed = False
+        if not dragged:
+            self.activate()
+            return
+        if pushed:
+            self.set_tucked(True)
         else:
-            self._worker_run_ticks = 0
-            if self._state == "working":
-                self._state = "idle"
-                self._state_timer = 0
+            self.reposition()
+            self._save()
+        self.update()
 
-        if self._card_is_open:
-            if self._ripples or self._droplets or self._confetti:
-                self.update()
-            return
+    def context_menu(self) -> QMenu:
+        menu = QMenu(self)
+        if self._tucked:
+            menu.addAction(i18n.t("Bring Lumi back"), lambda: self.set_tucked(False))
+        else:
+            menu.addAction(i18n.t("Ask Lumi"), self.toggle_requested.emit)
+            menu.addAction(i18n.t("Tuck away"), lambda: self.set_tucked(True))
+        menu.addAction(i18n.t("Move to bottom"), self.move_to_bottom)
+        return menu
 
-        self._state_timer += 1
+    def contextMenuEvent(self, ev):
+        self._hide_label()
+        self.context_menu().exec(ev.globalPos())
+        ev.accept()
 
-        # 4. State machine handling
-        if self._state == "celebrating":
-            self._celebrate_timer -= 1
-            self._walk_step += 1
-            if self._celebrate_timer <= 0:
-                self._state = "idle"
-                self._state_timer = 0
-            self.update()
-            return
+    # ── painting ─────────────────────────────────────────────────────────
+    def _face_pixmap(self, size: int) -> QPixmap:
+        dpr = self.devicePixelRatioF() or 1.0
+        key = (size, round(dpr, 2))
+        pix = self._face_cache.get(key)
+        if pix is None:
+            if self._face.isNull():
+                return QPixmap()
+            pix = self._face.scaled(max(1, round(size * dpr)), max(1, round(size * dpr)),
+                                    Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            pix.setDevicePixelRatio(dpr)
+            self._face_cache[key] = pix
+        return pix
 
-        if self._state == "typing":
-            self._typing_timer -= 1
-            if self._typing_timer <= 0:
-                self._state = "idle"
-                self._state_timer = 0
-            self.update()
-            return
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        lit = (self._hover or self.hasFocus() or self._dragging
+               or self._card_is_open or self._pulse > 0)
+        p.setOpacity(1.0 if lit else theme.LUMI_IDLE_OPACITY)
+        if self._tucked:
+            self._paint_tab(p)
+        else:
+            self._paint_face(p)
+        p.end()
 
-        if self._state == "working":
-            # Running briskly back and forth with determination during long operations
-            self._walk_step += 1
-            speed = 2.0
-            min_x = 18.0
-            max_x = max(40.0, float(self.width() - 95))
-
-            if self._facing_left:
-                self._mascot_x -= speed
-                if self._mascot_x <= min_x:
-                    self._mascot_x = min_x
-                    self._facing_left = False
-            else:
-                self._mascot_x += speed
-                if self._mascot_x >= max_x:
-                    self._mascot_x = max_x
-                    self._facing_left = True
-
-            # Effort droplets
-            if self._walk_step % 18 == 0:
-                ax = self._mascot_x + (34 if self._facing_left else 12)
-                self._droplets.append(_WaterDrop(ax, 38.0, random.uniform(-0.8, 0.8), -1.8))
-
-            self.update()
-            return
-
-        if self._state == "shaking":
-            self._shake_phase -= 1
-            if self._shake_phase <= 0:
-                self._state = "sitting"
-                self._state_timer = 0
-            self.update()
-            return
-
-        if self._state == "leaping":
-            return
-
-        if self._state == "waving":
-            self._walk_step += 1
-            self.update()
-            return
-
-        if self._state == "idle":
-            self._walk_step += 1
-            if self._state_timer > 60:  # ~3 seconds
-                if random.random() < 0.35:
-                    self._state = "sitting"
-                    self._state_timer = 0
-                else:
-                    self._state = "walking"
-                    min_x = 18.0
-                    max_x = max(40.0, float(self.width() - 95))
-                    t = random.uniform(min_x, max_x)
-                    if abs(t - self._mascot_x) < 45.0:
-                        t = max_x if self._mascot_x < (min_x + max_x) / 2 else min_x
-                    self._target_x = t
-                    self._facing_left = (self._target_x < self._mascot_x)
-                    self._state_timer = 0
-            self.update()
-            return
-
-        if self._state == "sitting":
-            self._walk_step += 1
-            if self._state_timer > 75:  # ~3.5 seconds
-                self._state = "walking"
-                min_x = 18.0
-                max_x = max(40.0, float(self.width() - 95))
-                t = random.uniform(min_x, max_x)
-                if abs(t - self._mascot_x) < 45.0:
-                    t = max_x if self._mascot_x < (min_x + max_x) / 2 else min_x
-                self._target_x = t
-                self._facing_left = (self._target_x < self._mascot_x)
-                self._state_timer = 0
-            self.update()
-            return
-
-        if self._state == "walking":
-            self._walk_step += 1
-            dist = self._target_x - self._mascot_x
-            if abs(dist) < 2.0 or self._state_timer > 180:
-                self._mascot_x = self._target_x
-                self._state = "idle"
-                self._state_timer = 0
-            else:
-                speed = 1.25  # Steady, grounded walking pace
-                step = speed if dist > 0 else -speed
-                self._mascot_x += step
-                self._facing_left = (step < 0)
-                self._stride_dist += abs(step)
-            self.update()
-
-    def enterEvent(self, event):
-        if not self._card_is_open and self._state not in ("leaping", "shaking", "celebrating"):
-            self._prev_state = self._state
-            self._state = "waving"
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):
-        if not self._card_is_open and self._state == "waving":
-            self._state = getattr(self, "_prev_state", "idle")
-            self._state_timer = 0
-        super().leaveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.toggle_requested.emit()
-        super().mouseReleaseEvent(event)
-
-    def _draw_star(self, painter: QPainter, cx: float, cy: float, r_outer: float, r_inner: float, color: QColor):
+    def _paint_tab(self, p: QPainter):
+        w, h = self.width(), self.height()
         path = QPainterPath()
-        for i in range(8):
-            angle = i * math.pi / 4.0
-            r = r_outer if i % 2 == 0 else r_inner
-            px = cx + r * math.cos(angle)
-            py = cy + r * math.sin(angle)
-            if i == 0:
-                path.moveTo(px, py)
-            else:
-                path.lineTo(px, py)
-        path.closeSubpath()
-        painter.fillPath(path, color)
+        # Rounded on the left, running off the right edge of the window.
+        path.addRoundedRect(QRectF(0, 0, w * 2, h), w * 0.9, w * 0.9)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(_LUMI_TEAL))
+        p.drawPath(path)
+        pen = QPen(QColor("#ffffff"), 2.0)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        cx, cy = w * 0.55, h / 2.0
+        p.drawLine(QPointF(cx + 2, cy - 5), QPointF(cx - 2.5, cy))
+        p.drawLine(QPointF(cx - 2.5, cy), QPointF(cx + 2, cy + 5))
+        if self.hasFocus():
+            p.setPen(QPen(QColor(theme.NEUTRAL[900]), 2.0))
+            p.setBrush(Qt.NoBrush)
+            p.drawPath(path)
 
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
-
-        # 1. Paint Ripples
-        for r in self._ripples:
-            col = QColor(r.color.red(), r.color.green(), r.color.blue(), int(r.alpha))
-            pen = QPen(col, 2.0)
-            painter.setPen(pen)
-            painter.setBrush(Qt.NoBrush)
-            painter.drawEllipse(QPointF(r.x, r.y), r.radius, r.radius * 0.45)
-
-        # 2. Paint Water Droplets
-        for d in self._droplets:
-            col = QColor(45, 212, 191, int(d.alpha))
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QBrush(col))
-            painter.drawEllipse(QPointF(d.x, d.y), d.r, d.r)
-
-        # 3. Paint Confetti (3.2 Celebration)
-        for c in self._confetti:
-            painter.save()
-            painter.translate(c.x, c.y)
-            painter.rotate(c.rot)
-            col = QColor(c.color.red(), c.color.green(), c.color.blue(), int(c.alpha))
-            painter.fillRect(QRectF(-c.w / 2, -c.h / 2, c.w, c.h), col)
-            painter.restore()
-
-        # 4. Paint Mascot (hidden while card is open, active otherwise)
-        if self._card_is_open and self._state != "leaping":
-            return
-
-        if not self._frames and not self._walk_frames:
-            return
-
-        # 45% scale: compact, neat and proportional (54x81)
-        mw, mh = 54, 81
-        bob_y = 0.0
-        tilt = 0.0
-        scale_x = 1.0
-        scale_y = 1.0
-        y_base = float(self._stage_h) - mh + 2.5  # Feet planted comfortably on the dark pill top rim
-
-        pix = None
-
-        if self._state == "walking":
-            # True articulated walking: alternating leg steps, no tilt bouncing
-            if self._walk_frames:
-                walk_idx = int(self._stride_dist / 5.5) % len(self._walk_frames)
-                pix = self._walk_frames[walk_idx]
-            elif self._frames:
-                pix = self._frames[0]
-            # Head follows mouse gently while walking
-            tilt = self._head_pitch * 0.35
-
-        elif self._state == "idle":
-            is_blink = (self._state_timer % 70) in (0, 1, 2)
-            if is_blink and not self._blink_pix.isNull():
-                pix = self._blink_pix
-            elif not self._idle_pix.isNull():
-                pix = self._idle_pix
-            elif self._frames:
-                pix = self._frames[2 if is_blink else 0]
-
-            breath = math.sin(self._state_timer * 0.06)
-            bob_y = breath * 0.35
-            # Head tilts to follow mouse
-            tilt = self._head_pitch
-
-        elif self._state == "sitting":
-            if not self._idle_pix.isNull():
-                pix = self._idle_pix
-            elif self._frames:
-                pix = self._frames[0]
-            y_base += 6.0
-            breath = math.sin(self._state_timer * 0.05)
-            bob_y = breath * 0.35
-            tilt = self._head_pitch * 0.5
-
-        elif self._state == "working":
-            # Running worker progress
-            if self._walk_frames:
-                walk_idx = int((self._walk_step * 2.2) / 4.0) % len(self._walk_frames)
-                pix = self._walk_frames[walk_idx]
-            elif self._frames:
-                pix = self._frames[0]
-            tilt = 5.0
-
-        elif self._state == "celebrating":
-            seq = [4, 5, 6, 7]
-            idx = seq[(self._walk_step // 2) % len(seq)]
-            pix = self._frames[idx] if self._frames else None
-            bob_y = -abs(math.sin(self._walk_step * 0.45)) * 8.0
-            tilt = math.sin(self._walk_step * 0.45) * 8.0
-            self._draw_star(painter, self._mascot_x + mw + 5, y_base - 6, 5.0, 1.8, QColor(245, 158, 11, 230))
-            self._draw_star(painter, self._mascot_x - 8, y_base - 2, 4.0, 1.5, QColor(45, 212, 191, 230))
-
-        elif self._state == "waving":
-            seq = self._waving_seq
-            idx = seq[(self._walk_step // 3) % len(seq)]
-            pix = self._frames[idx] if self._frames else None
-            tilt = self._head_pitch * 0.4
-
-        elif self._state == "typing":
-            if not self._idle_pix.isNull():
-                pix = self._idle_pix
-            elif self._frames:
-                pix = self._frames[1]
-            bob_y = -self._typing_bob
-            tilt = self._head_pitch
-
-        elif self._state == "shaking":
-            idx = 2 if (self._shake_phase % 2 == 0) else 3
-            pix = self._frames[idx] if self._frames else None
-            bob_y = (self._shake_phase % 2) * 1.5
-            tilt = 5.0 if (self._shake_phase % 2 == 0) else -5.0
-
-        elif self._state == "leaping":
-            p = self._leap_progress
-            h_leap = 50.0
-            bob_y = -4.0 * h_leap * p * (1.0 - p)
-            tilt = 12.0
-            pix = self._frames[4] if self._frames else None
-        else:
-            if not self._idle_pix.isNull():
-                pix = self._idle_pix
-            elif self._frames:
-                pix = self._frames[0]
-
-        if not pix or pix.isNull():
-            return
-
-        target_x = self._mascot_x
-        target_y = y_base + bob_y
-
-        painter.save()
-        painter.translate(target_x + mw / 2, target_y + mh / 2)
-        if self._facing_left:
-            painter.scale(scale_x, scale_y)
-            rot = -tilt
-        else:
-            painter.scale(-scale_x, scale_y)
-            rot = tilt
-        if rot != 0.0:
-            painter.rotate(rot)
-
-        scaled = pix.scaled(mw, mh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        painter.drawPixmap(-scaled.width() // 2, -scaled.height() // 2, scaled)
-        painter.restore()
+    def _paint_face(self, p: QPainter):
+        ring = self._RING
+        r = QRectF(self.rect()).adjusted(ring, ring, -ring, -ring)
+        # Soft shadow, drawn (no QGraphicsEffect: those turn black on some
+        # Windows GPU drivers when a widget sits over a scroll area).
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(9, 9, 11, 46))
+        p.drawEllipse(r.translated(0, 1.5))
+        p.setBrush(QColor("#ffffff"))
+        p.drawEllipse(r)
+        face = r.adjusted(2, 2, -2, -2)
+        clip = QPainterPath()
+        clip.addEllipse(face)
+        p.save()
+        p.setClipPath(clip)
+        # The avatar's own disc is ~96 % of its square; overscan so its black
+        # corners stay outside the clip.
+        size = int(face.width() * 1.08)
+        pix = self._face_pixmap(size)
+        if not pix.isNull():
+            p.drawPixmap(QPointF(face.center().x() - size / 2.0,
+                                 face.center().y() - size / 2.0), pix)
+        p.restore()
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(_LUMI_TEAL), 2.0))
+        p.drawEllipse(r.adjusted(1, 1, -1, -1))
+        if self._pulse > 0:
+            grow = ring * self._pulse
+            c = QColor(_LUMI_TEAL)
+            c.setAlphaF(max(0.0, 0.8 * (1.0 - self._pulse)))
+            p.setPen(QPen(c, 2.0))
+            p.drawEllipse(r.adjusted(-grow, -grow, grow, grow))
+        if self.hasFocus():
+            p.setPen(QPen(QColor(theme.NEUTRAL[900]), 2.0))
+            p.drawEllipse(QRectF(self.rect()).adjusted(1, 1, -1, -1))
 
 
-# ── FULL FLOATING OVERLAY COORDINATOR WITH DIVE & POP TRANSITIONS ────────────
+# ── FULL FLOATING OVERLAY COORDINATOR ───────────────────────────────────────
 class LumiOverlay(QWidget):
-    """Coordinates the floating launcher and popup card with smooth Dive & Pop locomotion."""
+    """Coordinates the edge button and the popup card. The card opens beside
+    the button, never over it, so the button stays where the owner put it and
+    a second press closes Lumi again."""
 
     command_requested = Signal(str)
 
@@ -1346,15 +1200,15 @@ class LumiOverlay(QWidget):
         self._support_panel = support_panel
         self.setFixedSize(1, 1)
 
-        self._launcher = LumiLauncherPill(host)
+        self._launcher = LumiEdgeButton(host)
         self._launcher.toggle_requested.connect(self.toggle)
+        self._launcher.tucked_changed.connect(lambda _t: self.reposition())
 
         self._card = LumiCard(support_panel, host)
         self._card.minimize_requested.connect(self.close)
         self._card.close_requested.connect(self.close)
         self._card.expand_toggled.connect(lambda _: self.reposition())
         self._card.command_requested.connect(self.command_requested.emit)
-        self._card.typing_occurred.connect(self._launcher.on_user_typing)
         if hasattr(support_panel, "command_requested"):
             support_panel.command_requested.connect(self.command_requested.emit)
 
@@ -1364,19 +1218,20 @@ class LumiOverlay(QWidget):
         self._card.hide()
         self.reposition()
 
-        # Follow host resizing and typing automatically
+        # Follow host resizing automatically
         self._host.installEventFilter(self)
 
+    @property
+    def button(self) -> LumiEdgeButton:
+        return self._launcher
+
     def eventFilter(self, watched, event):
-        if watched == self._host:
-            if event.type() == QEvent.Resize:
-                self.reposition()
-            elif event.type() == QEvent.KeyPress:
-                self._launcher.on_user_typing()
+        if watched == self._host and event.type() == QEvent.Resize:
+            self.reposition()
         return super().eventFilter(watched, event)
 
     def celebrate(self, duration_ms: int = 3500):
-        """3.2 Celebration: triggers confetti burst and happy dance."""
+        """A finished task or a sent quote: one pulse of the button."""
         self._launcher.trigger_celebration(duration_ms)
         if hasattr(self._card, "_welcome_header") and hasattr(self._card._welcome_header, "set_mode"):
             self._card._welcome_header.set_mode("waving")
@@ -1389,42 +1244,37 @@ class LumiOverlay(QWidget):
             self._card_anim.stop()
 
         self._is_closing = False
+        self._launcher.set_card_open(True)
+        self._launcher._hide_label()
         self.reposition()
 
-        use_effects = (os.environ.get("PRISM_EFFECTS", "1") != "0"
-                       and os.environ.get("QT_QPA_PLATFORM") != "offscreen")
-
-        if not use_effects:
+        if not _effects_on():
             self._card.show()
             self._card.raise_()
             self._launcher.raise_()
-            self._launcher._card_is_open = True
             return
 
-        # 1. Trigger mascot leap & pop effect from the pill
-        self._launcher.trigger_leap_and_pop()
+        # Slide the card in from the edge it is docked to.
+        target_x = self._card.x()
+        cy = self._card.y()
+        start_x = target_x + 40
 
-        # 2. Smoothly slide & spring the card up
-        cx = self._card.x()
-        target_y = self._card.y()
-        start_y = target_y + 40
-
-        self._card.move(cx, start_y)
+        self._card.move(start_x, cy)
         self._card.show()
         self._card.raise_()
         self._launcher.raise_()
 
         anim = QVariantAnimation(self)
-        anim.setDuration(280)
-        anim.setStartValue(start_y)
-        anim.setEndValue(target_y)
+        anim.setDuration(240)
+        anim.setStartValue(start_x)
+        anim.setEndValue(target_x)
         anim.setEasingCurve(QEasingCurve.OutCubic)
 
         def _step(val):
-            self._card.move(cx, int(val))
+            self._card.move(int(val), cy)
 
         def _done():
-            self._card.move(cx, target_y)
+            self._card.move(target_x, cy)
             if hasattr(self._card, "_welcome_header") and hasattr(self._card._welcome_header, "set_mode"):
                 self._card._welcome_header.set_mode("waving")
 
@@ -1437,40 +1287,30 @@ class LumiOverlay(QWidget):
         if self._card_anim and self._card_anim.state() == QVariantAnimation.Running:
             self._card_anim.stop()
 
-        use_effects = (os.environ.get("PRISM_EFFECTS", "1") != "0"
-                       and os.environ.get("QT_QPA_PLATFORM") != "offscreen")
-
-        if not use_effects or not self._card.isVisible():
+        if not _effects_on() or not self._card.isVisible():
             self._is_closing = False
             self._card.hide()
-            self._launcher.trigger_dive_and_splash()
+            self._launcher.set_card_open(False)
             return
 
         self._is_closing = True
-
-        # Header mascot dives forward
-        if hasattr(self._card, "_welcome_header") and hasattr(self._card._welcome_header, "set_mode"):
-            self._card._welcome_header.set_mode("diving")
-
-        cx = self._card.x()
-        start_y = self._card.y()
-        end_y = self._launcher.y() - 10
+        cy = self._card.y()
+        start_x = self._card.x()
 
         anim = QVariantAnimation(self)
-        anim.setDuration(230)
-        anim.setStartValue(start_y)
-        anim.setEndValue(end_y)
+        anim.setDuration(200)
+        anim.setStartValue(start_x)
+        anim.setEndValue(start_x + 40)
         anim.setEasingCurve(QEasingCurve.InCubic)
 
         def _step(val):
-            self._card.move(cx, int(val))
+            self._card.move(int(val), cy)
 
         def _done():
             self._card.hide()
             self._is_closing = False
+            self._launcher.set_card_open(False)
             self.reposition()
-            # Splash & mascot emerges on top of the launcher pill
-            self._launcher.trigger_dive_and_splash()
 
         anim.valueChanged.connect(_step)
         anim.finished.connect(_done)
@@ -1486,20 +1326,16 @@ class LumiOverlay(QWidget):
     def reposition(self):
         area = self._host.rect()
         edge = 24
-        gap = 12
+        gap = theme.SPACE_3
 
-        lw = self._launcher.width()
-        lh = self._launcher.height()
-        lx = max(edge, area.width() - edge - lw)
-        ly = max(edge, area.height() - edge - lh)
-        self._launcher.move(lx, ly)
+        self._launcher.reposition()
+        b = self._launcher.geometry()
 
         cw = self._card.width()
         ch = self._card.height()
-        cx = max(edge, area.width() - edge - cw)
-        # Gap measured from top of the dark pill frame (y = ly + stage_h)
-        pill_top = ly + getattr(self._launcher, "_stage_h", 88)
-        cy = pill_top - gap - ch
-        if cy < edge:
-            cy = max(edge, area.height() - edge - ch)
+        # Right edge just left of the button (or the tucked tab).
+        cx = max(edge, b.x() - gap - cw)
+        # Bottom level with the button's bottom, kept inside the window.
+        cy = b.y() + b.height() - ch
+        cy = max(edge, min(cy, area.height() - edge - ch))
         self._card.move(cx, cy)

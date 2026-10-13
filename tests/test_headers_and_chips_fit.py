@@ -55,14 +55,29 @@ class FilterChipsFit(unittest.TestCase):
 class RoomForTheLumiLauncher(unittest.TestCase):
     """The floating Ask-Lumi widget (a 56 px pill with the mascot on top) sat on
     top of "Discard" and half of "Start the work", which are pinned to the foot
-    of the workbench, and on the last row of scrolling pages. Measured in the
-    real window at max scroll, 1 Oct 2026."""
+    of the workbench, and on the last row of scrolling pages (1 Oct 2026), so
+    every screen reserved 120 px under its last row for it. On 14 Oct 2026 the
+    owner asked for an Android-style edge button instead ("Lumi is getting in
+    between a lot"): a ~44 px face docked to the right edge, resting above a
+    footer row. The contract is now the other way round — the button stays out
+    of the content, and the screens stop reserving room for it."""
 
-    def test_the_clearance_covers_the_pill_and_the_mascot(self):
+    def test_the_button_is_small_and_lives_in_the_right_gutter(self):
         import theme
-        self.assertGreaterEqual(theme.LAUNCHER_CLEARANCE, 56 + 64)
+        self.assertLessEqual(theme.LUMI_BUTTON_MAX, 48)
+        # At most this much of a page's content column is ever under it.
+        reach = theme.LUMI_BUTTON_MAX + theme.LUMI_EDGE_GAP - theme.PAGE_PAD
+        self.assertLessEqual(reach, theme.CARD_PAD + 4)
 
-    def test_pages_leave_that_room_under_their_last_row(self):
+    def test_it_rests_above_a_footer_row(self):
+        """Next, "Start the work" and Discard sit PAGE_PAD (or 32) off the
+        bottom and are at most a tall button high."""
+        import theme
+        self.assertGreaterEqual(theme.LUMI_REST_FROM_BOTTOM,
+                                max(theme.PAGE_PAD, 32) + theme.BTN_HEIGHT_LG
+                                + theme.SPACE_2)
+
+    def test_pages_no_longer_reserve_room_under_their_last_row(self):
         import theme
         from widgets.panel_base import Page
 
@@ -72,14 +87,11 @@ class RoomForTheLumiLauncher(unittest.TestCase):
                 pass
         page = _P({})
         margins = page._scroll.widget().layout().contentsMargins()
-        self.assertGreaterEqual(margins.bottom(),
-                                theme.PAGE_PAD + theme.LAUNCHER_CLEARANCE)
+        self.assertEqual(margins.bottom(), theme.PAGE_PAD)
 
-
-    def test_home_leaves_that_room_too(self):
-        """Home built its own scroll column with `PAGE_PAD + 40`, so at maximum
-        scroll "Browse Add-ons" and "Explore all" sat under the mascot (seen in
-        the real window, 2 Oct 2026). Built against a temporary home so the
+    def test_home_no_longer_reserves_room_either(self):
+        """Home built its own scroll column, and once reserved
+        LAUNCHER_CLEARANCE under it. Built against a temporary home so the
         panel cannot read the developer's own runs."""
         import tempfile
         from unittest import mock
@@ -90,23 +102,25 @@ class RoomForTheLumiLauncher(unittest.TestCase):
                 mock.patch.object(paths, "user_dir", lambda *a, **k: tmp):
             panel = HomePanel({})
             margins = panel._col.contentsMargins()
-            self.assertGreaterEqual(margins.bottom(),
-                                    theme.PAGE_PAD + theme.LAUNCHER_CLEARANCE)
+            self.assertEqual(margins.bottom(), theme.PAGE_PAD)
+            self.assertFalse(hasattr(panel, "_lumi"))   # one launcher, the window's
             panel.deleteLater()
 
-    def test_the_setup_wizard_leaves_that_room_under_next(self):
-        """The wizard's pinned Back/Next row sat under the pill, so Next (and
-        "Start using Prism") was covered on first run (seen in the real window,
-        9 Oct 2026). Its pages scroll so that room does not clip them on a short
-        laptop screen."""
+    def test_the_setup_wizard_keeps_next_clear_of_the_button(self):
+        """The wizard's pinned Back/Next row sat under the old pill, so Next
+        (and "Start using Prism") was covered on first run (9 Oct 2026). The
+        row now ends below where the button rests, and its pages still
+        scroll so a short laptop screen does not clip them."""
         import theme
         from PySide6.QtWidgets import QScrollArea
         from widgets.wizard_panel import WizardPanel
         panel = WizardPanel({})
         root = panel.layout()
         footer = root.itemAt(root.count() - 1).layout()
-        self.assertGreaterEqual(footer.contentsMargins().bottom(),
-                                theme.PAGE_PAD + theme.LAUNCHER_CLEARANCE)
+        bottom = footer.contentsMargins().bottom()
+        self.assertEqual(bottom, theme.PAGE_PAD)
+        self.assertLessEqual(bottom + panel.next_btn.sizeHint().height(),
+                             theme.LUMI_REST_FROM_BOTTOM)
         for i in range(panel.stack.count()):
             self.assertIsInstance(panel.stack.widget(i), QScrollArea)
         panel.deleteLater()

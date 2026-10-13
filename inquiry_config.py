@@ -33,6 +33,8 @@ config saved by this version opens cleanly in the previous one.
 from __future__ import annotations
 
 import os
+import re
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 DEFAULT_FOLDER = os.path.join(os.path.expanduser("~"), "Prism Inquiries")
 
@@ -129,3 +131,209 @@ def is_ready(cfg: dict) -> bool:
 
 # Back-compat alias. See is_complete's docstring.
 _complete = is_complete
+
+
+# ── the pipeline: each client's words, optional steps, money ─────────────
+# Many businesses use Email inquiries. What each STAGE means is fixed (the
+# mail check moves cards by it — see register.stage_of in the engine); what
+# a client CALLS each stage, whether they use the optional steps, how often
+# they chase and what money looks like are theirs, kept at
+# cfg["inquiry"]["pipeline"]. Nothing here names one company's products,
+# rates or terms. The defaults reproduce Prism as it was before the
+# pipeline, so a config that has never seen this key behaves as it did.
+#
+# Stage keys: inquiry, quoted, nego, po, won. Step keys: negotiation,
+# details (ask for details before quoting), acknowledgement (order
+# acknowledgement on accepting a PO), proforma (proforma + advance before
+# the order is confirmed). register.STEP_DEFAULTS holds the same step
+# defaults on the engine side; tests/test_inquiry_pipeline.py keeps the two
+# from drifting.
+PIPELINE_DEFAULTS = {
+    "labels": {"inquiry": "Inquiry", "quoted": "Quoted",
+               "nego": "Negotiation", "po": "PO received", "won": "Won"},
+    "words": {"quote": "Quotation", "po": "PO"},
+    "steps": {"negotiation": True, "details": True,
+              "acknowledgement": True, "proforma": False},
+    "remind_days": 2,
+    "max_reminders": 3,
+    "currency": "₹",
+    "tax_label": "GST",
+    "tax_percent": 18,
+}
+
+# Currencies written with lakh/crore grouping: 1,10,000 not 110,000.
+_INDIAN_CURRENCIES = {"₹", "inr", "rs", "rs."}
+
+
+# A stage name or word longer than this blows a board column up to its
+# full text width (review R12); the setup dialog caps typing at the same.
+LABEL_MAX = 24
+
+
+def _text(value, default: str, limit: int | None = None) -> str:
+    text = value.strip() if isinstance(value, str) and value.strip() else default
+    if limit and len(text) > limit:
+        text = text[:limit].rstrip()
+    return text
+
+
+# The words and currency/tax pairs Pipeline & wording offers. Copy tables
+# (devtools/extract_strings.COPY_TABLES), so every offered word reaches the
+# translation catalogue, and a word picked from the list is shown
+# translated, like the default (review R14).
+WORDS = {"quote": ["Quotation", "Offer", "Proposal", "Estimate"],
+         "po": ["PO", "Order", "Work order", "Purchase order"]}
+TAXES = [("₹", "GST", 18), ("$", "Sales tax", 0), ("€", "VAT", 20),
+         ("AED", "VAT", 5), ("£", "VAT", 20)]
+
+
+def _number(value, default, *, low=0, high=None):
+    """A number from a config value that may be missing, text or nonsense.
+    Out of range or unreadable is the default, never an exception: a
+    hand-edited config.json must not stop the inquiry screen opening."""
+    try:
+        number = float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    if number != number or number < low or (high is not None and number > high):
+        return default
+    return int(number) if number == int(number) else number
+
+
+def _switch(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower() not in ("0", "false", "no", "off")
+    return default
+
+
+def pipeline_of(cfg: dict) -> dict:
+    """The client's pipeline settings, complete: every key present, every
+    value readable. Missing or partial config falls back key by key — to
+    the inquiry settings Prism already had (followup_days, max_reminders,
+    terms.gst_percent) and then to PIPELINE_DEFAULTS. A fresh dict each
+    call; callers may edit it and save what they mean to save."""
+    s = settings_of(cfg or {})
+    raw = s.get("pipeline")
+    raw = raw if isinstance(raw, dict) else {}
+    d = PIPELINE_DEFAULTS
+    labels = raw.get("labels") if isinstance(raw.get("labels"), dict) else {}
+    words = raw.get("words") if isinstance(raw.get("words"), dict) else {}
+    steps = raw.get("steps") if isinstance(raw.get("steps"), dict) else {}
+    terms = s.get("terms") if isinstance(s.get("terms"), dict) else {}
+    remind = _number(s.get("followup_days"), d["remind_days"], low=1, high=365)
+    chases = _number(s.get("max_reminders"), d["max_reminders"], low=0, high=50)
+    tax = _number(terms.get("gst_percent"), d["tax_percent"], low=0, high=100)
+    return {
+        "labels": {k: _text(labels.get(k), v, LABEL_MAX)
+                   for k, v in d["labels"].items()},
+        "words": {k: _text(words.get(k), v, LABEL_MAX)
+                  for k, v in d["words"].items()},
+        "steps": {k: _switch(steps.get(k), v) for k, v in d["steps"].items()},
+        "remind_days": _number(raw.get("remind_days"), remind, low=1, high=365),
+        "max_reminders": _number(raw.get("max_reminders"), chases, low=0, high=50),
+        "currency": _text(raw.get("currency"), d["currency"]),
+        "tax_label": _text(raw.get("tax_label"), d["tax_label"]),
+        "tax_percent": _number(raw.get("tax_percent"), tax, low=0, high=100),
+    }
+
+
+def stage_label(cfg: dict, stage: str) -> str:
+    """What this client calls a stage. "lost" is not a column on the board
+    and has no client wording; it reads "Lost"."""
+    return pipeline_of(cfg)["labels"].get(stage, "Lost" if stage == "lost" else stage)
+
+
+def word(cfg: dict, key: str) -> str:
+    """The client's word for "quote" (Quotation, Offer, ...) or "po"."""
+    return pipeline_of(cfg)["words"].get(key, key)
+
+
+def step_enabled(cfg: dict, step: str) -> bool:
+    return bool(pipeline_of(cfg)["steps"].get(step, False))
+
+
+def remind_days(cfg: dict) -> int:
+    return int(pipeline_of(cfg)["remind_days"])
+
+
+def max_reminders(cfg: dict) -> int:
+    """Reminders sent before the card says "call them"."""
+    return int(pipeline_of(cfg)["max_reminders"])
+
+
+def currency_of(cfg: dict) -> str:
+    return pipeline_of(cfg)["currency"]
+
+
+def tax_of(cfg: dict) -> tuple[str, float]:
+    """("GST", 18) — the tax's name and percentage."""
+    p = pipeline_of(cfg)
+    return p["tax_label"], p["tax_percent"]
+
+
+# A hand-typed money cell: currency words and "/-" are dropped as whole
+# tokens first ("Rs. 1,25,000" must not keep the dot of "Rs."), then what
+# is left must be one plain or comma-grouped number. Anything else —
+# "1e6", "abc", NaN — is unreadable, never a guessed figure (review R7).
+_MONEY_TOKENS = re.compile(
+    r"(?i)(?:₹|\$|€|£|\brs\b\.?|\binr\b|\busd\b|\beur\b|\bgbp\b|\baed\b|/-)")
+_PLAIN_AMOUNT = re.compile(
+    r"^-?(?:\d{1,3}(?:,\d{3})+|\d{1,2}(?:,\d{2})*,\d{3}|\d+)(?:\.\d+)?$")
+
+
+def _read_amount(value) -> Decimal | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        if isinstance(value, (int, Decimal)):
+            amount = Decimal(value)
+        elif isinstance(value, float):
+            amount = Decimal(repr(value))
+        else:
+            text = re.sub(r"\s+", "", _MONEY_TOKENS.sub(" ", str(value)))
+            if not _PLAIN_AMOUNT.match(text):
+                return None
+            amount = Decimal(text.replace(",", ""))
+        if not amount.is_finite():
+            return None
+        return amount.quantize(Decimal("0.01"), ROUND_HALF_UP)
+    except (InvalidOperation, ValueError, ArithmeticError):
+        return None
+
+
+def format_money(value, currency: str = "₹") -> str:
+    """"₹1,10,000", "$110,000", "AED 110,000.50" — for display only; the
+    register keeps plain digits (register.money_str).
+
+    Lakh grouping for rupees — the same grouping as the engine's
+    quoting.indian_currency(), repeated here because this module stays
+    engine-free — and groups of three for every other currency. Paise only
+    when there are some. Unreadable is "", never "₹0", which would read as
+    a real price of nothing.
+    """
+    amount = _read_amount(value)
+    if amount is None:
+        return ""
+    symbol = currency if isinstance(currency, str) else "₹"
+    negative = amount < 0
+    whole, _, paise = f"{abs(amount):.2f}".partition(".")
+    if symbol.strip().lower() in _INDIAN_CURRENCIES:
+        if len(whole) > 3:
+            head = re.sub(r"(\d)(?=(\d\d)+$)", r"\1,", whole[:-3])
+            whole = f"{head},{whole[-3:]}"
+    else:
+        whole = f"{int(whole):,}"
+    text = whole if paise == "00" else f"{whole}.{paise}"
+    # A word-like symbol ("AED", "Rs") needs a space before the digits.
+    if symbol and symbol[-1:].isalpha():
+        symbol += " "
+    return f"{'-' if negative else ''}{symbol}{text}"
+
+
+def money_of(cfg: dict, value) -> str:
+    """format_money() in this client's currency."""
+    return format_money(value, currency_of(cfg))

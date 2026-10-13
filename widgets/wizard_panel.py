@@ -68,8 +68,8 @@ class WizardPanel(QWidget):
 
     @staticmethod
     def _scrolling(page: QWidget) -> QScrollArea:
-        """The footer now leaves room for the Lumi launcher, which takes height
-        from the page — on a short window the page scrolls instead of clipping."""
+        """Each page scrolls, so on a short laptop window it scrolls instead
+        of clipping under the pinned Back/Next footer."""
         area = QScrollArea()
         area.setWidgetResizable(True)
         area.setFrameShape(QScrollArea.NoFrame)
@@ -290,9 +290,10 @@ class WizardPanel(QWidget):
     # ── footer: Back / Next / Start ──────────────────────────────────────────
     def _footer(self) -> QHBoxLayout:
         row = QHBoxLayout()
-        # The Ask-Lumi pill sits bottom-right and used to cover Next.
+        # Lumi's edge button rests above this row (theme.LUMI_REST_FROM_BOTTOM),
+        # so Next is never under it and no extra room is reserved.
         row.setContentsMargins(theme.PAGE_PAD, theme.SPACE_4,
-                               theme.PAGE_PAD, theme.PAGE_PAD + theme.LAUNCHER_CLEARANCE)
+                               theme.PAGE_PAD, theme.PAGE_PAD)
         row.setSpacing(theme.SPACE_3)
         self.back_btn = C.button(i18n.t("Back"), "secondary",
                                  on_click=self._go_back)

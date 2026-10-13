@@ -23,7 +23,7 @@ import json, os, re, shutil, sys, time
 SRC_PROFILE = os.path.join(os.path.expanduser("~"), ".prism", "chrome_profile")
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "canva_probe_out")
 PROFILE = os.path.join(OUT, "profile")
-COMPOSER = "#prompt-textarea"
+COMPOSER = "#prompt-textarea, form div.ProseMirror[contenteditable='true']"
 SEND = "button[data-testid='send-button']"
 ASSISTANT = "[data-message-author-role='assistant']"
 

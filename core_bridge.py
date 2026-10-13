@@ -270,6 +270,27 @@ def get_quoting():
     return quoting
 
 
+def inquiry_stage(row: dict, pipeline: dict | None = None) -> tuple[str, str]:
+    """(stage, sub) of one register row on the Email inquiries board --
+    core.register.stage_of. `pipeline` is inquiry_config.pipeline_of(cfg)
+    (or the raw cfg["inquiry"]["pipeline"]); None means the defaults."""
+    from core import register
+    return register.stage_of(row, pipeline)
+
+
+def price_order_from_rate_list(text: str, rate_path: str, *, quantity=None,
+                               tax_percent=18):
+    """A PO with no quotation behind it, priced from the client's rate list
+    (cfg["inquiry"]["rate_list"]) -- core.quoting.price_order. Returns a
+    PricedOrder (.lines, .subtotal, .tax, .total, .unsure). Sends nothing.
+    Raises core.quoting.RateFileError when the rate list cannot be read,
+    so the caller can say which file and why."""
+    from core import quoting
+    items = quoting.load_rates(rate_path)
+    return quoting.price_order(text, items, quantity=quantity,
+                               tax_percent=tax_percent)
+
+
 def get_sop():
     from core import sop
     return sop

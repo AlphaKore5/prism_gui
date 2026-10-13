@@ -64,6 +64,7 @@ from addons.inquiry.setup import (
 )
 from widgets import controls as C
 from workers import DraftWorker, InboxCheckWorker, POReadWorker, SendWorker
+from addons.inquiry.pipeline_actions import PipelineActions, PipelineScreen
 
 # What each sorted category is called on screen. The engine's keys are English
 # identifiers; these are the words a customer reads.
@@ -1047,7 +1048,7 @@ def open_in_file_manager(path: str) -> None:
         pass
 
 
-class InquiryDialog(QWidget):
+class InquiryDialog(PipelineActions, PipelineScreen, QWidget):
     """The working screen — embedded in the main window's stack, not a
     popup. It used to be a modal PrismDialog opened with .exec(); the
     customer did not want a working window that blocks the rest of the app,
@@ -1189,15 +1190,22 @@ class InquiryDialog(QWidget):
         self.tabs.currentChanged.connect(
             lambda index: self._sync_panel(TABS[index][0])
             if 0 <= index < len(TABS) else None)
-        self.body.addWidget(self.tabs, stretch=1)
+        # The pipeline board, and the view switch around these tabs
+        # (pipeline_actions.PipelineScreen). The tabs are not reparented
+        # into anything new: they are page 1 of `views`.
+        self._build_views()
 
-        root.addWidget(C.hairline())
+        self.classic_footer = QWidget()
+        self.classic_footer.setObjectName("inquiryClassicFooter")
+        cfl = QVBoxLayout(self.classic_footer)
+        cfl.setContentsMargins(0, 0, 0, 0)
+        cfl.setSpacing(0)
+        cfl.addWidget(C.hairline())
         footer_row = QHBoxLayout()
-        # Room under the buttons for the floating Ask-Lumi widget: this screen
-        # is embedded in the main window, so the pill sat on top of "Back to
-        # Email inquiry automation" (seen in the real window, 1 Oct 2026).
+        # No room reserved for Ask-Lumi any more: it is a small button docked
+        # to the window's right edge, clear of this row (14 Oct 2026).
         footer_row.setContentsMargins(theme.PAGE_PAD, theme.SPACE_3, theme.PAGE_PAD,
-                                      theme.SPACE_3 + theme.LAUNCHER_CLEARANCE)
+                                      theme.SPACE_3)
         footer_row.setSpacing(theme.SPACE_2)
         footer_row.addWidget(self.button(
             i18n.t("Open the folder"), "secondary", icon_name="folder",
@@ -1215,7 +1223,8 @@ class InquiryDialog(QWidget):
         footer_row.addWidget(self.button(
             i18n.t("Back to Email inquiry automation"), "secondary",
             on_click=lambda: self.navigate.emit("inquiry")))
-        root.addLayout(footer_row)
+        cfl.addLayout(footer_row)
+        root.addWidget(self.classic_footer)
 
         # Checking on a timer is what makes this "runs by itself" rather than
         # "a button somebody remembers". Started here rather than in the
@@ -1229,7 +1238,8 @@ class InquiryDialog(QWidget):
 
         self.enter()
 
-    def enter(self, tab: int = 0, auto_check: bool = False):
+    def enter(self, tab: int = 0, auto_check: bool = False,
+              view: str | None = None):
         """Show the latest state. Called every time the main window
         navigates to this screen — the replacement for what constructing a
         fresh dialog and calling .exec() used to do. `tab` lands on the tab
@@ -1245,7 +1255,16 @@ class InquiryDialog(QWidget):
         self._render_arrived()
         self._render_replies()
         self._render_orders()
+        self._tabs_quiet = True
         self.tabs.setCurrentIndex(max(0, min(int(tab or 0), len(TABS) - 1)))
+        self._tabs_quiet = False
+        # view="auto" (the main window's way in): the board, unless the
+        # launcher asked for a tab only the client file or All mail holds.
+        # No view (old callers): the classic tabs, exactly as before.
+        if view == "auto":
+            view = {"register": "client", "arrived": "mail"}.get(
+                TABS[self.tabs.currentIndex()][0], "pipeline")
+        self.show_view(view or "classic")
         self._apply_auto_interval()
         # Deferred so the screen paints before a "needs setup?" question can
         # pop over it. `_closed` guards it in the (now rare, since this
@@ -1263,6 +1282,19 @@ class InquiryDialog(QWidget):
         teardown is `closeEvent`, below, for the rare case this widget is
         actually destroyed rather than merely navigated away from."""
         self._auto.stop()
+        self.drawer.close_drawer()
+        self._restore_sidebar()
+
+    def resizeEvent(self, event):                       # noqa: N802
+        super().resizeEvent(event)
+        if hasattr(self, "drawer"):
+            self.drawer.place()
+            self._fit_sidebar()
+
+    def showEvent(self, event):                         # noqa: N802
+        super().showEvent(event)
+        if hasattr(self, "drawer"):
+            QTimer.singleShot(0, self._fit_sidebar)
 
     def button(self, text: str, variant: str = "secondary",
               icon_name: str = "", on_click=None, tooltip: str = "",
@@ -1488,16 +1520,7 @@ class InquiryDialog(QWidget):
     def _add_row_actions(self, panel: _SelectedPanel) -> _SelectedPanel:
         """Every button a register row can have, built once for this panel.
         Which of them show is actions_for()'s decision, per row."""
-        handlers = {
-            "prepare": self._prepare_quotation, "revise": self._prepare_quotation,
-            "remind": self._send_reminder, "win_back": self._win_back,
-            "record_po": self._record_po_by_hand,
-            "already_quoted": self._mark_already_quoted,
-            "boq": self._make_boq, "phone": self._phone_reply,
-            "lost": self._mark_lost, "edit": self._edit_row,
-            "folder": self._open_inquiry_folder, "delete": self._delete_inquiry,
-            "history": self._show_history,
-        }
+        handlers = self._row_handlers()
         for key, text, variant in ROW_ACTIONS:
             panel.add_action(key, text, variant, handlers[key])
         return panel
@@ -1747,6 +1770,7 @@ class InquiryDialog(QWidget):
             self.replies_table.setCurrentCell(0, 0)
         self._show_reply()
         self._refresh_counts()
+        self._render_board()
 
     def _selected_reply(self):
         index = self.replies_table.currentRow()
@@ -1769,8 +1793,8 @@ class InquiryDialog(QWidget):
         if position >= 0:
             self.intent_picker.setCurrentIndex(position)
 
-    def _apply_reply(self):
-        item = self._selected_reply()
+    def _apply_reply(self, *, item=None, intent=None):
+        item = item or self._selected_reply()
         if item is None:
             QMessageBox.information(
                 self, i18n.t("Email inquiry automation"),
@@ -1794,7 +1818,7 @@ class InquiryDialog(QWidget):
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if proceed != QMessageBox.Yes:
                 return
-        intent = self.intent_picker.currentData()
+        intent = intent or self.intent_picker.currentData()
         register = CB.get_register()
         # Work on the copy in the register we just loaded, not on the copy
         # carried by the worker's Item — saving writes self._register_rows,
@@ -1949,6 +1973,7 @@ class InquiryDialog(QWidget):
         if items:
             self.orders_table.setCurrentCell(0, 0)
         self._refresh_counts()
+        self._render_board()
 
     def _selected_order(self):
         index = self.orders_table.currentRow()
@@ -1992,8 +2017,8 @@ class InquiryDialog(QWidget):
                     return path
         return candidates[0] if len(candidates) == 1 else ""
 
-    def _review_po(self):
-        item = self._selected_order()
+    def _review_po(self, *, item=None):
+        item = item or self._selected_order()
         if item is None:
             QMessageBox.information(
                 self, i18n.t("Purchase order"),
@@ -2123,6 +2148,7 @@ class InquiryDialog(QWidget):
             .replace("{no}", target.get("Inquiry no", ""))
             .replace("{po}", number)
             .replace("{value}", target.get("Order value", "") or value_text))
+        self._after_po_accepted(target, number)
 
     # ── running a check ───────────────────────────────────────────────────
     def _is_the_open_screen(self) -> bool:
@@ -2555,10 +2581,12 @@ class InquiryDialog(QWidget):
             # acceptance, so it wins the opening tab; a reply on a live
             # quotation — somebody waiting on an answer — beats a new
             # inquiry, which will still be there this afternoon.
+            self._tabs_quiet = True
             self.tabs.setCurrentIndex(
                 TAB_INDEX["orders"] if result.orders else
                 TAB_INDEX["replies"] if result.replies else
                 TAB_INDEX["to_quote"])
+            self._tabs_quiet = False
         self._quiet = False
         # Last, and only after the register has been written: a reminder must
         # never go out to somebody whose reply arrived in this same check and
@@ -2833,6 +2861,7 @@ class InquiryDialog(QWidget):
         self._render_to_quote()
         self._render_waiting()
         self._reselect(focus_no)
+        self._render_board()
 
     def _reselect(self, inquiry_no: str):
         """After a save, land the owner back on the row they were on — in
@@ -3543,13 +3572,13 @@ class InquiryDialog(QWidget):
                                  "Other.")
         self.status.setText(done)
 
-    def _delete_from_list(self, key: str):
+    def _delete_from_list(self, key: str, *, items=None):
         """Delete on "They answered" and "Order came": the picked mails
         leave that list. The inquiries they belong to stay in the register
         exactly as they are — that is what the other tabs' Delete is for.
         A row on "Order came" that is there because it was accepted by
         hand has no mail behind it and cannot be taken off this way."""
-        items = self._picked_items(key)
+        items = items if items is not None else self._picked_items(key)
         mails = [i for i in items if getattr(i, "message_id", "")]
         skipped = len(items) - len(mails)
         if not mails:
@@ -3659,9 +3688,9 @@ class InquiryDialog(QWidget):
         self._show_po(None, row, advice=i18n.t(
             "Type the PO number, date and value from the printed order."))
 
-    def _remove_order(self):
+    def _remove_order(self, *, item=None):
         """A mail Prism took for a purchase order and was not one."""
-        item = self._selected_order()
+        item = item or self._selected_order()
         if item is None:
             return
         if item.message_id and self._root():
@@ -4436,11 +4465,21 @@ def _read_sent_quotation(row: dict):
     quoting = CB.get_quoting()
     register = CB.get_register()
     folder = row.get("Folder", "")
-    number = (row.get("Quotation no", "") or "").replace("/", "-")
+    number = (row.get("Quotation no", "") or "").strip()
     if not folder or not number:
         return None
-    path = os.path.join(folder, f"{number}.csv")
-    if not os.path.exists(path):
+    # The LATEST revision the customer holds (review R5): Rev n's CSV when
+    # there is one, else the first copy. A PO matching Rev 1 checked against
+    # Rev 0 flags every line as a price difference.
+    latest = max(register.revision_of(row),
+                 register.revision_on_disk(folder, number))
+    path = ""
+    for n in range(latest, -1, -1):
+        candidate = os.path.join(folder, register.quote_file_name(number, n, "csv"))
+        if os.path.exists(candidate):
+            path = candidate
+            break
+    if not path:
         return None
     try:
         with open(path, "r", encoding="utf-8-sig", newline="") as f:

@@ -177,6 +177,8 @@ COPY_TABLES = {
     "STATUS_COPY", "STATES", "STEP_COPY", "COPY", "LABELS", "TIPS",
     "PLACEHOLDERS", "SKIP", "SOON",
     "MORE", "ADDONS", "DIRECT", "SECTIONS", "CARDS", "TABS", "STEPS",
+    # inquiry_config: the words and tax names Pipeline & wording offers.
+    "WORDS", "TAXES",
     # addons/<key>/addon.py's `MANIFEST = Addon(...)`. The rail and Home
     # tables are now comprehensions over the registry, so their labels and
     # tips are no longer literals where this scan can see them -- they live

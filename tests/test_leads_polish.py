@@ -5,9 +5,11 @@ own window) and 1366 wide, the Leads screen had these defects, each held here:
 
   · the floating Ask-Lumi pill sat on the right end of the bulk bar at every
     size — Find e-mails, More and the primary "Add to sequence" were under it;
-    the bar now stops short of the pill (theme.LAUNCHER_REACH) and, when even
-    that is too narrow, folds Remove and then "Clear selection" into More
-    instead of letting Qt crush the labels to stubs;
+    the bar stopped short of the pill and, when even that is too narrow, folds
+    Remove and then "Clear selection" into More instead of letting Qt crush the
+    labels to stubs. Since 14-Oct-2026 the pill is a small edge button resting
+    above the bar, so the bar gives way only if the button is dragged into its
+    band, and then by the button's real width;
   · the header's "?" button was 64x48 beside 34px buttons — the page header's
     own padding rule inflated it;
   · the page picker was 127x36 beside 27x28 previous/next buttons;
@@ -126,18 +128,15 @@ class TheBulkBarGivesWayToTheLauncher(unittest.TestCase):
         self._fit(width, inset=280)
         self.assertFalse(c._b_more.isHidden())             # the pill took 280px of it
 
-    def test_what_the_pill_covers_is_its_reach_less_the_room_beside_the_bar(self):
+    def test_what_the_button_covers_is_its_reach_less_the_room_beside_the_bar(self):
         inset = CK.LeadsCockpit._inset_past_launcher
-        self.assertEqual(inset(37), theme.LAUNCHER_REACH + theme.SPACE_2 - 37)
-        self.assertEqual(inset(10_000), 0)                 # a bar nowhere near the pill
+        self.assertEqual(inset(37, 50), 50 + theme.SPACE_2 - 37)
+        self.assertEqual(inset(10_000, 50), 0)             # a bar nowhere near it
 
-    def test_outside_the_main_window_there_is_no_pill_to_clear(self):
+    def test_outside_the_main_window_there_is_no_button_to_clear(self):
         self.assertEqual(CK.LeadsCockpit()._launcher_inset(), 0)
 
-    def test_in_the_real_window_nothing_on_the_bar_reaches_the_pill(self):
-        """A QMainWindow at the owner's laptop size, the cockpit its central
-        widget, the bar open at the foot: every visible control ends left of
-        the pill's reach, and the labels are not cut to stubs."""
+    def _window(self):
         win = QMainWindow()
         c = _cockpit(8)
         win.setCentralWidget(c)
@@ -145,11 +144,41 @@ class TheBulkBarGivesWayToTheLauncher(unittest.TestCase):
         win.show()
         self.addCleanup(win.close)
         _tick(c, 3)
+        return win, c
+
+    def _button(self, host):
+        from widgets.lumi_card import LumiEdgeButton
+        button = LumiEdgeButton(host, persist=False)
+        button.show()
+        return button
+
+    def test_at_its_resting_spot_the_button_leaves_the_whole_bar(self):
+        """The old pill took ~300 px off the bar; the edge button rests above
+        a footer row, so the bar keeps its full width."""
+        win, c = self._window()
+        button = self._button(c)
         c._fit_bulk()
+        top = c._bulk_bar_w.mapTo(c, c._bulk_bar_w.rect().topLeft()).y()
+        self.assertLess(button.geometry().bottom(), top)   # it rests above the bar
+        self.assertEqual(c._launcher_inset(), 0)
+
+    def test_dragged_into_the_bar_nothing_on_the_bar_reaches_it(self):
+        """A QMainWindow at the owner's laptop size, the cockpit its central
+        widget, the bar open at the foot and the button dragged down onto it:
+        every visible control ends left of the button, and the labels are not
+        cut to stubs."""
+        win, c = self._window()
+        button = self._button(c)
         bar = c._bulk_bar_w
+        c._fit_bulk()
+        bar.layout().activate()
+        mid = bar.mapTo(c, bar.rect().center()).y()
+        button._from_bottom = max(0, c.height() - mid - button.diameter() // 2)
+        button.reposition()
+        c._fit_bulk()
         bar.layout().activate()          # the layout pass an event loop would run next
         self.assertGreater(c._launcher_inset(), 0)
-        limit = win.width() - theme.LAUNCHER_REACH
+        limit = button.mapTo(win, button.rect().topLeft()).x()
         for w in [c._sel_lbl, c._bulk_clear, c._b_more, *c._bulk_actions()]:
             if w.isHidden():
                 continue
@@ -158,13 +187,16 @@ class TheBulkBarGivesWayToTheLauncher(unittest.TestCase):
             self.assertGreaterEqual(w.width(), w.sizeHint().width(), w.text())
         self.assertGreater(bar.width(), 0)
 
-    def test_the_theme_constants_are_the_pills_real_size(self):
-        from widgets.lumi_card import LumiLauncherPill
-        pill = LumiLauncherPill()
-        self.addCleanup(pill.deleteLater)
-        edge = 24                                          # LumiOverlay.reposition's edge
-        self.assertEqual(theme.LAUNCHER_REACH, pill.maximumWidth() + edge)
-        self.assertEqual(theme.LAUNCHER_BAND, pill.height() - pill._stage_h + edge)
+    def test_the_button_is_far_smaller_than_the_reach_the_bar_used_to_give(self):
+        from widgets.lumi_card import LumiEdgeButton
+        from PySide6.QtWidgets import QWidget
+        host = QWidget()
+        host.resize(1366, 700)
+        self.addCleanup(host.deleteLater)
+        button = LumiEdgeButton(host, persist=False)
+        reach = host.width() - button.x()
+        self.assertLessEqual(reach, theme.LUMI_BUTTON_MAX + theme.LUMI_EDGE_GAP)
+        self.assertLess(reach, 285 + 24)                   # the old pill's reach
 
 
 class ThePagerControlsShareOneHeight(unittest.TestCase):

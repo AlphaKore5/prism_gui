@@ -955,9 +955,10 @@ class MainWindow(QMainWindow):
 
         wrap = QWidget()
         layout = QVBoxLayout(wrap)
-        # Extra room at the foot: "Start the work" / "Discard" are pinned there,
-        # outside the scroll, and the Ask-Lumi pill used to sit on top of them.
-        layout.setContentsMargins(40, 32, 40, 32 + theme.LAUNCHER_CLEARANCE)
+        # "Start the work" / "Discard" are pinned to the foot, outside the
+        # scroll. Lumi's edge button rests above a footer row
+        # (theme.LUMI_REST_FROM_BOTTOM), so no room is reserved for it here.
+        layout.setContentsMargins(40, 32, 40, 32)
         layout.setSpacing(20)
         layout.addWidget(self._workbench_header())
         layout.addWidget(self.work_stack, stretch=1)
@@ -1558,7 +1559,8 @@ class MainWindow(QMainWindow):
         .exec() returned: reload cfg, refresh the launcher behind it.
         """
         self.inquiry_work_panel.cfg = self.cfg
-        self.inquiry_work_panel.enter(tab=int(tab or 0), auto_check=auto_check)
+        self.inquiry_work_panel.enter(tab=int(tab or 0), auto_check=auto_check,
+                                      view="auto")
         self.screens.setCurrentIndex(INQUIRY_WORK)
         self.sidebar.set_current("inquiry")
 
