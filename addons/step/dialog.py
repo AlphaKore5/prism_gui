@@ -1235,6 +1235,13 @@ class StepDialog(PrismDialog):
                                     kind="step", task=report["file"])
         except Exception:                               # noqa: BLE001
             pass
+        # The same green confirmation _on_measured shows for where the
+        # measurement was saved — missing here since "Build this" and the
+        # follow-up path were added, so a completed build gave no visible
+        # sign of where the modified file actually landed.
+        self.files_label.setText(
+            i18n.t("Saved — the modified file is at ") + result["out"])
+        self.meas_box.setVisible(True)
         if popup is not None:
             popup.set_busy(False)
         QDesktopServices.openUrl(QUrl.fromLocalFile(result["review"]))

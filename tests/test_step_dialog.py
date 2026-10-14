@@ -806,11 +806,33 @@ class BuildThisWorksFromAnyFollowUpEvenReopenedOnes(unittest.TestCase):
             dlg._on_applied(
                 {"out": "/x/modified 2026-10-14 0700.step", "log": [],
                  "after": {"file": "Assem1.step", "parts": [],
-                          "mode": "plastic", "overall_mm": (0, 0, 0)},
+                          "mode": "plastic", "overall_mm": (0, 0, 0),
+                          "warnings": []},
                  "review": "/x/review.html"},
                 m=m, popup=fake_popup)
         fake_popup.set_busy.assert_called_with(False)
         self.assertEqual(len(dlg._queue), 1)
+
+    def test_on_applied_shows_the_green_banner_with_the_built_path(self):
+        """Round: the same green "saved" confirmation _on_measured shows
+        for the measurement folder went missing for a completed BUILD once
+        "Build this" and the follow-up path were added — a build finished
+        with no visible sign of where the modified file actually landed."""
+        dlg = _dialog()
+        m = _fake_measured(dlg)
+        with mock.patch.object(SD.QDesktopServices, "openUrl"), \
+                mock.patch.object(CB.config, "save_artifact"):
+            dlg._on_applied(
+                {"out": "/x/PET CORE - modified 2026-10-14 0700.step",
+                 "log": [],
+                 "after": {"file": "Assem1.step", "parts": [],
+                          "mode": "plastic", "overall_mm": (0, 0, 0),
+                          "warnings": []},
+                 "review": "/x/review.html"},
+                m=m, popup=mock.MagicMock())
+        self.assertIn("PET CORE - modified 2026-10-14 0700.step",
+                      dlg.files_label.text())
+        self.assertTrue(dlg.meas_box.isVisibleTo(dlg))
 
     def test_the_automatic_first_build_still_advances_the_queue_exactly_once(self):
         """The ordinary, unchanged path: a fresh Edit's own first answer,
@@ -834,7 +856,12 @@ class BuildThisWorksFromAnyFollowUpEvenReopenedOnes(unittest.TestCase):
         # Finish the chain by hand, as the real worker's `done` signal
         # would — _on_planned's default (m=None, popup=None) is exactly
         # this automatic path, and it must still reach _finish() once.
-        with mock.patch.object(CB.config, "save_run") as saved:
+        # PlanReviewDialog must be mocked here too: _on_planned opens one
+        # regardless of popup, and an unmocked one calls a real .exec()
+        # that blocks forever with nothing to click it closed.
+        with mock.patch.object(CB.config, "save_run") as saved, \
+                mock.patch.object(SD, "PlanReviewDialog") as review_dlg:
+            review_dlg.return_value.exec.return_value = 0   # Rejected/Close
             dlg._on_planned({"plan": ['{"changes": [], "advice": []}']}, {})
         saved.assert_called_once()
 
