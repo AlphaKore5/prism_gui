@@ -10,6 +10,37 @@ Tests: **1966 passing** (6 skipped, 8 Sep 2026 after Round 16 landed on main —
 
 ---
 
+# 1.6.3 — the 1.6.2 release, published (14 Oct 2026)
+
+1.6.2 never reached customers: its build was too big for GitHub to host (see
+below), so CI stopped before publishing. 1.6.3 is the same content and nothing
+else new, plus the fix. Everything listed under 1.6.2 ships in 1.6.3.
+
+- **Updates: a build too big for one GitHub release is now hosted across
+  several.** GitHub allows 1000 files on a release and Prism hosts every file of
+  an update separately. STEP's engine (cadquery, OCP, vtk) took Windows to 1466
+  files and Linux/macOS to 1542, so the build failed at "Generate the (unsigned)
+  update manifest" on all three. Past 900 files each file now names its part in
+  the signed manifest; part 1 stays at `<tag>-assets-<platform>` where older
+  builds look, and the rest continue in `-2`, `-3`. `release_all.py` creates and
+  fills every part. A build under one release's worth is unchanged.
+  **Consequence:** a 1.6.1 or older app cannot finish an in-app update to a
+  multi-part version, so its first update to 1.6.3 falls back to the browser
+  download; every update after that is in-app. See `RELEASING-UPDATES.md`.
+- **STEP: Edit and the saved conversation no longer fail on the engine that is
+  on GitHub.** The STEP screens were written against a newer local engine than
+  the one that was ever pushed. Two things they call were missing there:
+  `core.stepfile.modified_name` (every Edit failed at its first line) and the
+  `"conversation"` entry of `core.stepfile.names()` (opening or saving a model's
+  conversation raised `KeyError`). The GUI now builds both names itself when the
+  engine cannot (`addons/step/workers.py::_modified_name`,
+  `addons/step/dialog.py::_conversation_path`), in exactly the shapes the engine
+  uses, so a later engine that has them changes nothing. Still engine-side and
+  unpushed: the email-inquiry "delete many" / "clear" actions
+  (`worklist.remove`, `worklist.clear`).
+
+---
+
 # 1.6.2 — release roll-up (14 Oct 2026)
 
 What this version carries on top of 1.6.1: the full Email Inquiry pipeline
