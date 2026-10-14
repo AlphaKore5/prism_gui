@@ -918,7 +918,11 @@ class StepDialog(PrismDialog):
     # any one of them.
     def _conversation_path(self, m: dict) -> str:
         stem = m["report"]["stem"]
-        return os.path.join(self._root(), self.sf.names(stem)["conversation"])
+        # The engine names it; one that predates the key (the one on GitHub
+        # did when 1.6.3 was cut) raised KeyError on every open and every save
+        # of a model's conversation, so the same name is made here as a floor.
+        name = self.sf.names(stem).get("conversation") or f"{stem} - conversation.json"
+        return os.path.join(self._root(), name)
 
     def _load_conversation(self, m: dict) -> list:
         path = self._conversation_path(m)

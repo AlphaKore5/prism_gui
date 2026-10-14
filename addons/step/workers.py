@@ -12,12 +12,27 @@ The engine is reached through core_bridge only (tests/test_engine_facade.py).
 """
 from __future__ import annotations
 
+import datetime as _dt
 import os
 
 from PySide6.QtCore import Signal
 
 import core_bridge as CB
 from workers import _Worker
+
+
+def _modified_name(SF, report: dict) -> str:
+    """The file an Edit writes, stamped with when it was built, so two
+    requests on one model never share a name. The engine names it
+    (core.stepfile.modified_name); an engine build that predates that
+    function -- the one on GitHub did when 1.6.3 was cut -- would have
+    failed every Edit with "no attribute 'modified_name'", so the same
+    shape is made here when it is missing."""
+    ask = getattr(SF, "modified_name", None)
+    if ask is not None:
+        return ask(report)
+    base, ext = os.path.splitext(SF.names(report)["modified"])
+    return f"{base} {_dt.datetime.now():%Y-%m-%d %H%M%S}{ext}"
 
 
 class StepMeasureWorker(_Worker):
@@ -107,7 +122,7 @@ class StepApplyWorker(_Worker):
             import shutil
             SF = CB.get_stepfile()
             names = SF.names(self.report)
-            out_path = os.path.join(self.out_dir, SF.modified_name(self.report))
+            out_path = os.path.join(self.out_dir, _modified_name(SF, self.report))
             built = SF.apply_plan(self.path, self.plan, out_path)
             after = SF.analyse(out_path, mode=self.mode, k_factor=self.k_factor)
             try:
