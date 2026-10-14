@@ -342,6 +342,28 @@ except ImportError:
     print("[prism] Google Drive libraries not installed - picker will be "
           "unavailable in this build")
 
+# STEP's engine. OCP is OpenCascade's own Python bindings — dozens of
+# separate compiled extension submodules (OCP.TopoDS, OCP.BRepBuilderAPI,
+# …), each its own .pyd/.so, not one package with internal imports
+# PyInstaller's static analysis can trace. Neither cadquery nor OCP ships a
+# PyInstaller hook of its own (checked: no __pyinstaller/ in either
+# package, and pyinstaller-hooks-contrib carries none for them either), so
+# without this, the ones core.stepfile happens to import at analysis time
+# bundle and the rest silently don't — a build that passed on the
+# developer's machine and failed on a customer's with a DIFFERENT error
+# than "no module named cadquery" (that one's just this requirements.txt
+# missing the line; this is the next failure after that's fixed).
+try:
+    import cadquery    # noqa: F401
+    import OCP          # noqa: F401
+    hiddenimports += collect_submodules("OCP")
+    hiddenimports += collect_submodules("cadquery")
+    datas += collect_data_files("OCP")
+    print("[prism] STEP's cadquery/OCP bundled")
+except ImportError:
+    print("[prism] cadquery not installed - STEP will be unavailable in "
+          "this build")
+
 # Prism Studio's browser. playwright._impl._driver.compute_driver_executable()
 # locates both the Node driver AND the Chromium binary as a sibling of
 # wherever `playwright.__file__` resolves to at runtime — under a frozen

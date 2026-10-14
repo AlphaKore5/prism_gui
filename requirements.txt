@@ -49,6 +49,16 @@ playwright
 ezdxf     # BOQ reads DXF geometry directly (pulls in numpy)
 pillow    # Prism Reel draws every frame with PIL
 
+# STEP reads the 3D model with this (it carries OCP, the OpenCascade
+# bindings — the actual geometry engine, not a thin wrapper). Unlike
+# shapely below, there is no silent degrade: core_bridge.step_available()
+# fails outright without it, so a build missing this ships a STEP button
+# that cannot open on any customer machine at all, developer's own machine
+# excepted — exactly what a customer screenshot caught on a Windows build
+# from before this line existed. Adds roughly 230MB (OCP alone), so this is
+# the next playwright-sized line in this file, not a small one.
+cadquery
+
 # Gerber, and the exact drift this file's header warns about happening again.
 # Both were in prism_terminal/requirements.txt (or in neither) and not here,
 # so no build has ever shipped them.

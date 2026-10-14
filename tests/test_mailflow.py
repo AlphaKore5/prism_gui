@@ -529,6 +529,33 @@ class TheRegisterFile(unittest.TestCase):
 
     def test_indian_money_formatting_is_read_back(self):
         self.assertEqual(register.money("₹ 1,42,500.00"), Decimal("142500.00"))
+
+
+class DeletingRowsForGood(unittest.TestCase):
+
+    def setUp(self):
+        self.rows = [register.blank_row() for _ in range(3)]
+        for row, no in zip(self.rows, ("INQ-1", "INQ-2", "INQ-3")):
+            row["Inquiry no"] = no
+
+    def test_one_row_goes_the_others_stay(self):
+        left = register.remove(self.rows, ["INQ-2"])
+        self.assertEqual([r["Inquiry no"] for r in left], ["INQ-1", "INQ-3"])
+
+    def test_several_at_once(self):
+        left = register.remove(self.rows, ["INQ-1", "INQ-3"])
+        self.assertEqual([r["Inquiry no"] for r in left], ["INQ-2"])
+
+    def test_an_unknown_inquiry_no_does_nothing(self):
+        left = register.remove(self.rows, ["INQ-9"])
+        self.assertEqual(len(left), 3)
+
+    def test_matching_is_not_case_sensitive(self):
+        left = register.remove(self.rows, ["inq-2"])
+        self.assertEqual([r["Inquiry no"] for r in left], ["INQ-1", "INQ-3"])
+
+    def test_nothing_named_removes_nothing(self):
+        self.assertEqual(len(register.remove(self.rows, [])), 3)
         self.assertEqual(register.money(""), Decimal(0))
         self.assertEqual(register.money("not a number"), Decimal(0))
 
@@ -1331,6 +1358,43 @@ class TheDailyLoop(unittest.TestCase):
                                    "Message-ID": "<b4@shaktiauto.in>"})
         result = self._run_as([po_mail], triage.ORDER, knowledge=k)
         self.assertEqual(len(result.orders), 1)
+
+    def test_an_unsorted_reply_on_an_open_inquiry_still_counts_as_a_reply(self):
+        """Found from a real report: a customer's plain "Confirmed, please
+        proceed" on an already-quoted inquiry carries none of the rules'
+        inquiry/order/payment words, so local sorting calls it UNSORTED —
+        not actionable. It showed up in All Mail (which lists every fetched
+        message regardless of category) but never reached the register,
+        so "They answered" never saw it even though the customer plainly
+        had. Thread membership must outrank the sorter's guess, including
+        when the sorter has no guess at all."""
+        k = triage.Knowledge(customers={"shaktiauto.in"})
+        self._run([message()], knowledge=k)
+        confirmation = message(subject="Re: Enquiry — best price please",
+                              body="Confirmed, please proceed.",
+                              headers={"In-Reply-To": "<a1@shaktiauto.in>",
+                                       "Message-ID": "<b2@shaktiauto.in>"})
+        result = self._run_as([confirmation], triage.UNSORTED, knowledge=k)
+        self.assertEqual(len(result.replies), 1)
+        self.assertEqual(len(result.orders), 0)
+        self.assertEqual(len(register.load(self.paths.register_csv)), 1,
+                         "still one row, not a second one")
+
+    def test_a_bounce_on_our_own_sent_quote_is_never_filed_as_a_reply(self):
+        """A bounce can legitimately thread-match (it quotes our own sent
+        message back to us), but it is not the customer answering — their
+        mailbox never got the quote at all. Filing it as a reply would be
+        actively wrong, not just a missed one."""
+        k = triage.Knowledge(customers={"shaktiauto.in"})
+        self._run([message()], knowledge=k)
+        bounce = message(subject="Re: Enquiry — best price please",
+                         body="Delivery has failed for these recipients.",
+                         headers={"In-Reply-To": "<a1@shaktiauto.in>",
+                                  "Message-ID": "<b2@mailer-daemon>",
+                                  "Auto-Submitted": "auto-replied"})
+        result = self._run_as([bounce], triage.OTHER, knowledge=k)
+        self.assertEqual(len(result.replies), 0)
+        self.assertEqual(len(result.orders), 0)
 
     def test_a_genuinely_new_correspondents_order_is_unaffected(self):
         """The narrowing only matters once there is an existing inquiry to

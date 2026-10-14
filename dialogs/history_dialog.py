@@ -521,6 +521,8 @@ class HistoryDialog(PrismDialog):
                 return {"questions": [data]}
             return {}
         day, clock = _when(filename)
+        step_info = record.get("step") or {}
+        reel_info = record.get("reel") or {}
 
         # Collect all stages: pipeline order first, then any extra stages from responses, links, or routing
         ran = [s for s in A.PIPELINE_ORDER
@@ -533,9 +535,28 @@ class HistoryDialog(PrismDialog):
             # make a History card titled "Brief" after fixing legacy strings.
             if isinstance(s, str) and s and not s.startswith("_") and s not in ran:
                 ran.append(s)
-
-        step_info = record.get("step") or {}
-        reel_info = record.get("reel") or {}
+        # STEP's own response keys ("ask · <model>", "plan · <model>",
+        # "draft · <model>") are not pipeline stages — they are its own
+        # conversation, one per attached model, rendered below as an
+        # actual labelled back-and-forth (_step_conversation) instead of a
+        # raw joined text dump under a stage title that just repeated the
+        # key ("Ask · Pet Core 02 06"). Left in `ran` they duplicated that
+        # block and, worse, showed only the single latest saved answer
+        # with no "you asked / it answered" structure at all.
+        #
+        # Only dropped from `ran` when that model's conversation file
+        # actually rendered something — a run saved before this existed
+        # has no such file, and must keep showing its old raw answer here
+        # rather than silently losing it.
+        step_conversations = {}
+        for m in step_info.get("models") or []:
+            html = self._step_conversation(m.get("conversation", ""))
+            if html:
+                step_conversations[os.path.splitext(m.get("file", ""))[0]] = html
+        if step_conversations:
+            ran = [s for s in ran if not any(
+                s == f"{p} · {stem}"
+                for p in ("ask", "plan", "draft") for stem in step_conversations)]
 
         step_count = len(ran) + (1 if step_info else 0) + (1 if reel_info else 0)
         query_html = _esc(str(record.get("query") or ""))
@@ -599,6 +620,10 @@ class HistoryDialog(PrismDialog):
                 parts.append(f"<span style='font-size:12px;'>File: <b>{_esc(m.get('file', ''))}</b> &nbsp;·&nbsp; "
                              f"Folder: {_esc(m.get('out_dir', ''))}</span><br>")
             parts.append("</div>")
+            for m in models:
+                stem = os.path.splitext(m.get("file", ""))[0]
+                if stem in step_conversations:
+                    parts.append(step_conversations[stem])
 
         if reel_info:
             mp4 = reel_info.get("mp4") or reel_info.get("artifact") or ""
@@ -757,6 +782,42 @@ class HistoryDialog(PrismDialog):
             parts.append(f"<p style='color:{theme.NEUTRAL[600]}'>This run didn't "
                          f"record any step responses.</p>")
 
+        return "".join(parts)
+
+    @classmethod
+    def _step_conversation(cls, path: str) -> str:
+        """The whole back-and-forth about one STEP model, read off the file
+        addons/step/dialog.py keeps it in — the same thread the Answer
+        popup itself shows, not the generic "what came back" dump above,
+        which only ever held the single latest saved answer with no sign
+        of who asked what. A run saved before this existed, or a missing
+        file, renders nothing here rather than an error."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                thread = json.load(f)
+            if not isinstance(thread, list) or not thread:
+                return ""
+        except (OSError, ValueError, TypeError):
+            return ""
+        parts = [cls._sub("The conversation")]
+        # Solid hex only — bgcolor is an HTML attribute, not a CSS
+        # property, and cannot parse the rgba() ACCENT_RAMP carries at
+        # low steps. That rendered as plain black with near-black text on
+        # top of it, not a tint: wrong value in the wrong kind of slot,
+        # not a dark-mode issue. theme.SURFACE is the same solid grey
+        # _quote()'s other callers in this file already use successfully.
+        you_bg, agent_bg = theme.NEUTRAL[100], theme.SURFACE
+        for i, turn in enumerate(thread):
+            if not isinstance(turn, (list, tuple)) or len(turn) != 2:
+                continue
+            speaker, text = turn
+            is_you = str(speaker).lower().startswith(("you asked", "you followed"))
+            bg = you_bg if is_you else agent_bg
+            body = (f"<p style='margin:0 0 4px 0;font-weight:700;"
+                    f"color:{theme.NEUTRAL[700]};font-size:11px;"
+                    f"text-transform:uppercase'>{_esc(str(speaker))}</p>"
+                    + render_markdown(str(text)))
+            parts.append(cls._quote(body, bg, raw_html=True))
         return "".join(parts)
 
     @staticmethod

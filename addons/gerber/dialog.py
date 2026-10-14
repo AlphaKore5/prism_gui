@@ -78,6 +78,7 @@ class GerberDialog(PrismDialog):
             "our price for 500 pieces\" — leave it blank to just get the "
             "five figures.")
         self.ask.files_added.connect(self._on_files_added)
+        self.ask.file_removed.connect(self._on_file_removed)
         root.addWidget(self.ask)
 
         # The confidentiality promise is the reason this add-on is sellable, so
@@ -539,6 +540,17 @@ class GerberDialog(PrismDialog):
         self.status.setText(i18n.t(
             "Job attached. Choose the client's format above if you want "
             "the figures in their form, then press Generate."))
+
+    def _on_file_removed(self, path: str):
+        """The chip's own 'x' only ever touched AskPanel's private list —
+        this keeps the dialog's real one (what Generate actually measures)
+        in step with what the person sees attached."""
+        if path in self.paths:
+            self.paths.remove(path)
+        self.clean_btn.setEnabled(bool(self.paths))
+        self.generate_btn.setEnabled(bool(self.paths))
+        if not self.paths:
+            self.status.setText(i18n.t("No job attached yet."))
 
     # ── measuring ───────────────────────────────────────────────────────
 

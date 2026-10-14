@@ -34,7 +34,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication, QLabel, QTableWidgetSelectionRange,
+)
 
 import core_bridge as CB  # noqa: E402
 from core import inbox, mailflow, register, triage  # noqa: E402
@@ -446,23 +448,47 @@ class TheScreen(unittest.TestCase):
         result.knowledge = known
         return result
 
+    def test_the_time_column_shows_when_it_reached_us(self):
+        self.dialog._fill_arrived(self._result())
+        table = self.dialog.arrived
+        enquiry_row = next(r for r in range(table.rowCount())
+                           if table.item(r, 1).text() == "Enquiry")
+        self.assertEqual(table.item(enquiry_row, 6).text(), _local_clock())
+
+    def test_the_body_column_shows_a_short_preview(self):
+        self.dialog._fill_arrived(self._result())
+        table = self.dialog.arrived
+        enquiry_row = next(r for r in range(table.rowCount())
+                           if table.item(r, 1).text() == "Enquiry")
+        self.assertIn("compression spring", table.item(enquiry_row, 2).text())
+
+    def test_every_column_can_be_resized_by_hand(self):
+        """A real complaint: "From" was too wide for some rows and cut
+        the rest off on others, with no way to trade width between
+        columns — every column was locked to Stretch or ResizeToContents,
+        neither of which a mouse drag can override."""
+        head = self.dialog.arrived.horizontalHeader()
+        for column in range(self.dialog.arrived.columnCount()):
+            self.assertEqual(head.sectionResizeMode(column),
+                             UI.QHeaderView.Interactive)
+
     def test_every_message_shows_what_it_was_called_and_why(self):
         self.dialog._fill_arrived(self._result())
         table = self.dialog.arrived
         self.assertEqual(table.rowCount(), 3)
         for row in range(table.rowCount()):
-            self.assertTrue(table.item(row, 2).text(), "no category shown")
-            self.assertTrue(table.item(row, 3).text(), "no reason shown")
+            self.assertTrue(table.item(row, 3).text(), "no category shown")
+            self.assertTrue(table.item(row, 4).text(), "no reason shown")
 
     def test_the_newsletter_says_why_it_was_filed(self):
         self.dialog._fill_arrived(self._result())
-        reasons = [self.dialog.arrived.item(r, 3).text()
+        reasons = [self.dialog.arrived.item(r, 4).text()
                    for r in range(self.dialog.arrived.rowCount())]
         self.assertTrue(any("unsubscribe" in r for r in reasons), reasons)
 
     def test_categories_are_words_not_engine_keys(self):
         self.dialog._fill_arrived(self._result())
-        shown = {self.dialog.arrived.item(r, 2).text()
+        shown = {self.dialog.arrived.item(r, 3).text()
                  for r in range(self.dialog.arrived.rowCount())}
         for key in ("inquiry", "promotion", "other", "unsorted"):
             self.assertNotIn(key, shown, f"the raw key {key!r} reached the screen")
@@ -484,7 +510,7 @@ class TheScreen(unittest.TestCase):
             self.dialog.recategorise.findData("vendor"))
         with _NoSave():
             self.dialog._correct()
-        self.assertIn("Supplier", self.dialog.arrived.item(1, 2).text())
+        self.assertIn("Supplier", self.dialog.arrived.item(1, 3).text())
 
     def test_correcting_with_nothing_selected_does_nothing(self):
         self.dialog._fill_arrived(self._result())
@@ -492,6 +518,185 @@ class TheScreen(unittest.TestCase):
         with _NoSave() as guard:
             self.dialog._correct()
         self.assertEqual(guard.saved, [])
+
+    def test_marking_a_mail_as_a_reminder_flags_it(self):
+        self.dialog._fill_arrived(self._result())
+        self.dialog.arrived.setCurrentCell(0, 0)
+        self.dialog._toggle_reminder()
+        self.assertTrue(self.dialog._sorted_mail[0]["reminder"])
+        self.assertEqual(self.dialog.arrived.item(0, 7).text(), "Reminder")
+        self.assertEqual(self.dialog.reminder_btn.text(), "Remove reminder")
+
+    def test_marking_it_twice_unflags_it(self):
+        self.dialog._fill_arrived(self._result())
+        self.dialog.arrived.setCurrentCell(0, 0)
+        self.dialog._toggle_reminder()
+        self.dialog._toggle_reminder()
+        self.assertFalse(self.dialog._sorted_mail[0]["reminder"])
+        self.assertEqual(self.dialog.arrived.item(0, 7).text(), "")
+        self.assertEqual(self.dialog.reminder_btn.text(), "Mark as reminder")
+
+    def test_the_flag_survives_a_redraw(self):
+        """Same discipline _correct() already follows: the worklist file
+        itself has to change, not just what's on screen, or the very
+        next tab switch silently drops the flag."""
+        self.dialog._fill_arrived(self._result())
+        flagged_id = self.dialog._sorted_mail[0]["message_id"]
+        self.dialog.arrived.setCurrentCell(0, 0)
+        self.dialog._toggle_reminder()
+        self.dialog._render_arrived()
+        after = next(e for e in self.dialog._sorted_mail
+                    if e["message_id"] == flagged_id)
+        self.assertTrue(after["reminder"])
+
+    def test_toggling_with_nothing_selected_does_nothing(self):
+        self.dialog._fill_arrived(self._result())
+        self.dialog.arrived.setCurrentCell(-1, -1)
+        self.dialog._toggle_reminder()      # must not raise
+
+    def test_calling_it_an_inquiry_actually_registers_it(self):
+        """Found from a real report: correcting a mail to "this really is:
+        Inquiry" only ever taught Prism how to sort that SENDER'S future
+        mail — the mail in front of you stayed out of the register and
+        never reached To quote. It must become a real row."""
+        self.dialog._fill_arrived(self._result())
+        self.dialog.arrived.setCurrentCell(1, 0)          # the newsletter
+        self.dialog.recategorise.setCurrentIndex(
+            self.dialog.recategorise.findData("inquiry"))
+        with _NoSave():
+            self.dialog._correct()
+        self.assertEqual(len(self.dialog._register_rows), 1)
+        row = self.dialog._register_rows[0]
+        self.assertEqual(row["Email"], "promo@x.example")
+        self.assertEqual(row["Status"], register.NEW)
+        on_disk = register.load(mailflow.Paths(self.folder).register_csv)
+        self.assertEqual(len(on_disk), 1)
+
+    def test_correcting_to_inquiry_twice_does_not_duplicate_the_row(self):
+        self.dialog._fill_arrived(self._result())
+        self.dialog.arrived.setCurrentCell(1, 0)
+        self.dialog.recategorise.setCurrentIndex(
+            self.dialog.recategorise.findData("inquiry"))
+        with _NoSave():
+            self.dialog._correct()
+            self.dialog._correct()
+        self.assertEqual(len(self.dialog._register_rows), 1)
+
+    def test_a_mail_already_in_the_register_is_not_registered_again(self):
+        known = triage.Knowledge.from_dict(self.cfg["inquiry"]["knowledge"])
+        msg = message("Sale!", "promo@x.example", "buy now",
+                      {"List-Unsubscribe": "<https://x/u>"})
+        existing = register.from_message(msg)
+        register.save([existing], mailflow.Paths(self.folder).register_csv)
+        self.dialog._refresh_register()
+        self.dialog._fill_arrived(self._result())
+        self.dialog.arrived.setCurrentCell(1, 0)
+        self.dialog.recategorise.setCurrentIndex(
+            self.dialog.recategorise.findData("inquiry"))
+        with _NoSave():
+            self.dialog._correct()
+        self.assertEqual(len(self.dialog._register_rows), 1)
+
+    def test_correcting_to_something_else_does_not_register_it(self):
+        self.dialog._fill_arrived(self._result())
+        self.dialog.arrived.setCurrentCell(1, 0)
+        self.dialog.recategorise.setCurrentIndex(
+            self.dialog.recategorise.findData("vendor"))
+        with _NoSave():
+            self.dialog._correct()
+        self.assertEqual(self.dialog._register_rows, [])
+
+    @staticmethod
+    def _labels(dialog):
+        return [w.text() for w in dialog.findChildren(QLabel)]
+
+    def test_opening_a_row_shows_what_the_mail_actually_said(self):
+        """Found from a real report: this tab kept a subject line only, so
+        "what is this mail about" meant opening a real mail client.
+        Opening a row — double-click, or the button — must show the body
+        it was saved with, in its own closeable window, not a panel stuck
+        open on screen."""
+        self.dialog._fill_arrived(self._result())
+        table = self.dialog.arrived
+        enquiry_row = next(r for r in range(table.rowCount())
+                           if table.item(r, 1).text() == "Enquiry")
+        table.setCurrentCell(enquiry_row, 0)
+        created = []
+        real = UI._ArrivedMailDialog
+
+        class _Capturing(real):
+            def exec(self):
+                created.append(self)
+
+        with _Patched(UI, "_ArrivedMailDialog", _Capturing):
+            self.dialog._open_arrived()
+        self.assertEqual(len(created), 1)
+        self.assertTrue(any("compression spring" in t
+                           for t in self._labels(created[0])))
+
+    def test_double_clicking_a_row_opens_the_same_dialog(self):
+        self.dialog._fill_arrived(self._result())
+        self.dialog.arrived.setCurrentCell(0, 0)
+        created = []
+        real = UI._ArrivedMailDialog
+
+        class _Capturing(real):
+            def exec(self):
+                created.append(self)
+
+        with _Patched(UI, "_ArrivedMailDialog", _Capturing):
+            self.dialog.arrived.cellDoubleClicked.emit(0, 0)
+        self.assertEqual(len(created), 1)
+
+    def test_an_attachment_name_is_shown_too(self):
+        from email.message import EmailMessage
+        known = triage.Knowledge.from_dict(self.cfg["inquiry"]["knowledge"])
+        raw = EmailMessage()
+        raw["Subject"], raw["From"], raw["To"] = "Enquiry", \
+            "Mr Patel <purchase@shaktiauto.in>", "sales@acme.co.in"
+        raw["Date"] = "Mon, 10 Aug 2026 09:14:00 +0530"
+        raw["Message-ID"] = "<drawing-mail@x>"
+        raw.set_content("See attached drawing.")
+        raw.add_attachment(b"%PDF-1.4", maintype="application",
+                           subtype="pdf", filename="drawing.pdf")
+        msg = inbox.parse_message(raw.as_bytes(), uid=1)
+        result = mailflow.Result()
+        result.sorted_mail = [(msg, triage.rules_pass(msg, known))]
+        self.dialog._fill_arrived(result)
+        self.dialog.arrived.setCurrentCell(0, 0)
+        dialog = UI._ArrivedMailDialog(self.dialog._sorted_mail[0])
+        self.assertTrue(any("drawing.pdf" in t for t in self._labels(dialog)))
+
+    def test_opening_with_nothing_selected_asks_nothing(self):
+        self.dialog._fill_arrived(self._result())
+        self.dialog.arrived.setCurrentCell(-1, -1)
+        with mock.patch.object(UI.QMessageBox, "information") as info:
+            self.dialog._open_arrived()
+        info.assert_called_once()
+
+    def test_a_mail_from_before_this_feature_says_so_not_just_blank(self):
+        """Found from a real report: mail logged before body-saving existed
+        has no "body" key at all, and showing the same generic "(no text
+        in this mail)" for that made it look like saving text was still
+        broken, forever, for a thread the owner kept re-testing with.
+        That must read differently from a mail that genuinely says
+        nothing."""
+        entry = {"subject": "Old inquiry", "from_name": "Shlok Patel",
+                 "from_addr": "synergy007sp@gmail.com", "category": "inquiry",
+                 "date": "2026-10-02"}        # no "body" key — pre-fix shape
+        self.assertNotIn("body", entry)
+        dialog = UI._ArrivedMailDialog(entry)
+        labels = self._labels(dialog)
+        self.assertTrue(any("before Prism started saving" in t for t in labels))
+        self.assertFalse(any(t == "(no text in this mail)" for t in labels))
+
+    def test_a_genuinely_empty_mail_still_says_no_text(self):
+        entry = {"subject": "Blank", "from_name": "X", "category": "other",
+                 "date": "2026-10-02", "body": ""}
+        dialog = UI._ArrivedMailDialog(entry)
+        labels = self._labels(dialog)
+        self.assertTrue(any(t == "(no text in this mail)" for t in labels))
+        self.assertFalse(any("before Prism started saving" in t for t in labels))
 
     def test_the_bookmark_and_corrections_are_persisted_after_a_check(self):
         result = self._result()
@@ -1411,7 +1616,7 @@ class NothingIsLostToASecondCheckOrAReopen(unittest.TestCase):
 
         reopened = UI.InquiryDialog(self.cfg)
         reopened._refresh_register()
-        self.assertEqual(reopened.arrived.item(0, 2).text(),
+        self.assertEqual(reopened.arrived.item(0, 3).text(),
                          UI.CATEGORY_LABELS["other"])
 
 
@@ -1434,20 +1639,21 @@ class OnlyTheRightButtonsForTheRow(unittest.TestCase):
         self.assertEqual(A(register.ACCEPTED)[0], "record_po")
         self.assertEqual(A(register.NOT_CONVERTED)[0], "win_back")
         self.assertEqual(A(register.CONVERTED, has_drawing=False),
-                         ["edit", "folder", "history", "delete"])
+                         ["edit", "folder", "attachments", "history", "delete"])
         self.assertEqual(A("")[0], "prepare")            # blank = New
 
     def test_every_row_can_be_edited_opened_and_deleted(self):
         for status in register.STATUSES + ("",):
             keys = UI.actions_for(status)
-            self.assertEqual(keys[-4:], ["edit", "folder", "history", "delete"],
-                             status)
+            self.assertEqual(
+                keys[-5:],
+                ["edit", "folder", "attachments", "history", "delete"], status)
 
     def test_never_more_than_three_boxed_buttons(self):
         for status in register.STATUSES + ("",):
             for drawing in (False, True):
                 keys = UI.actions_for(status, has_drawing=drawing)
-                self.assertLessEqual(len(keys) - 4, 3, (status, drawing))
+                self.assertLessEqual(len(keys) - 5, 3, (status, drawing))
 
 
 class ThePanelUnderTheTable(unittest.TestCase):
@@ -1494,7 +1700,7 @@ class ThePanelUnderTheTable(unittest.TestCase):
         self.dialog.followups.setCurrentCell(0, 0)
         shown = self._visible("waiting")
         self.assertEqual({"remind", "phone", "lost", "edit", "folder",
-                          "history", "delete"}, shown)
+                          "attachments", "history", "delete"}, shown)
         self.assertEqual(self.dialog._selected_row()["Inquiry no"],
                          self.quoted["Inquiry no"])
 
@@ -1584,6 +1790,98 @@ class TheWholeStoryWindow(unittest.TestCase):
             dialog._show_history()
         self.assertEqual(len(created), 1)
         self.assertTrue(any("hello" in t for t in self._labels(created[0])))
+
+
+class ReadingAnInquirysAttachments(unittest.TestCase):
+    """A customer's actual files — read, saved elsewhere, or pulled
+    straight into a Prism prompt — from the inquiry's own row, without a
+    trip to the file manager."""
+
+    @staticmethod
+    def _labels(dialog) -> list[str]:
+        return [w.text() for w in dialog.findChildren(QLabel)]
+
+    def test_bookkeeping_files_are_never_offered_as_attachments(self):
+        folder = tempfile.mkdtemp()
+        open(os.path.join(folder, "drawing.pdf"), "w").write("x")
+        open(os.path.join(folder, "history.txt"), "w").write("x")
+        open(os.path.join(folder, "image_text.txt"), "w").write("x")
+        files = UI._attachment_files(folder)
+        self.assertEqual([os.path.basename(f) for f in files], ["drawing.pdf"])
+
+    def test_shows_every_real_attachment(self):
+        folder = tempfile.mkdtemp()
+        open(os.path.join(folder, "drawing.pdf"), "w").write("x")
+        open(os.path.join(folder, "photo.jpg"), "w").write("x")
+        dialog = UI._AttachmentsDialog({"Folder": folder}, None)
+        labels = self._labels(dialog)
+        self.assertTrue(any("drawing.pdf" in t for t in labels))
+        self.assertTrue(any("photo.jpg" in t for t in labels))
+
+    def test_nothing_attached_says_so_plainly(self):
+        dialog = UI._AttachmentsDialog({"Folder": tempfile.mkdtemp()}, None)
+        self.assertTrue(any("Nothing attached" in t
+                           for t in self._labels(dialog)))
+
+    def test_attach_to_prism_calls_back_with_the_real_path(self):
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "drawing.pdf")
+        open(path, "w").write("x")
+        calls = []
+        dialog = UI._AttachmentsDialog({"Folder": folder}, None)
+        dialog._attach(path, calls.append)
+        self.assertEqual(calls, [path])
+
+    def test_the_inquiry_screens_button_reaches_the_right_row(self):
+        folder = tempfile.mkdtemp()
+        open(os.path.join(folder, "drawing.pdf"), "w").write("x")
+        row = register.from_message(message())
+        row["Folder"] = folder
+        register.save([row], mailflow.Paths(folder).register_csv)
+        dialog = UI.InquiryDialog(ready_cfg(folder))
+        dialog.register_table.setCurrentCell(0, 0)
+        created = []
+        real = UI._AttachmentsDialog
+
+        class _Capturing(real):
+            def exec(self):
+                created.append(self)
+
+        with _Patched(UI, "_AttachmentsDialog", _Capturing):
+            dialog._show_attachments()
+        self.assertEqual(len(created), 1)
+        self.assertTrue(any("drawing.pdf" in t
+                           for t in self._labels(created[0])))
+
+    def test_attaching_from_the_inquiry_screen_reaches_main_window(self):
+        """attach_to_prism is what main_window.py actually connects to
+        _attach_path — see main_window.py's own wiring next to
+        sidebar.favorite_chosen. This is the whole point of the feature:
+        one click, no save-then-reattach."""
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "drawing.pdf")
+        open(path, "w").write("x")
+        row = register.from_message(message())
+        row["Folder"] = folder
+        register.save([row], mailflow.Paths(folder).register_csv)
+        dialog = UI.InquiryDialog(ready_cfg(folder))
+        dialog.register_table.setCurrentCell(0, 0)
+        emitted = []
+        dialog.attach_to_prism.connect(emitted.append)
+        created = []
+        real = UI._AttachmentsDialog
+
+        class _Capturing(real):
+            def exec(self):
+                created.append(self)
+
+        with _Patched(UI, "_AttachmentsDialog", _Capturing):
+            dialog._show_attachments()
+        self.assertEqual(len(created), 1)
+        attach_btn = next(b for b in created[0].findChildren(UI.QPushButton)
+                          if "Attach to Prism" in b.text())
+        attach_btn.click()
+        self.assertEqual(emitted, [path])
 
 
 class AnsweringByPhone(unittest.TestCase):
@@ -1695,6 +1993,125 @@ class DeletingAnInquiry(unittest.TestCase):
         self.dialog.register_table.setCurrentCell(0, 0)
         self._delete([UI.QMessageBox.Yes, UI.QMessageBox.No])
         self.assertTrue(os.path.isdir(folder))
+
+
+class DeletingFromAllMail(unittest.TestCase):
+    """The All-mail log has no register row and nothing on disk behind
+    it — the entries themselves ARE the record, one or many at once."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.cfg = ready_cfg(self.folder)
+        self.dialog = UI.InquiryDialog(self.cfg)
+        known = triage.Knowledge.from_dict(self.cfg["inquiry"]["knowledge"])
+        messages = [
+            message("Enquiry"),
+            message("Sale!", "promo@x.example", "buy now",
+                    {"List-Unsubscribe": "<https://x/u>"}),
+            message("Newsletter", "news@z.example", "weekly digest",
+                    {"List-Unsubscribe": "<https://z/u>"}),
+        ]
+        result = mailflow.Result()
+        result.sorted_mail = list(zip(
+            messages, [triage.rules_pass(m, known) for m in messages]))
+        self.dialog._fill_arrived(result)
+
+    def _delete(self, rows, answer):
+        table = self.dialog.arrived
+        table.clearSelection()
+        for r in rows:
+            table.setRangeSelected(
+                QTableWidgetSelectionRange(r, 0, r, table.columnCount() - 1),
+                True)
+        with mock.patch.object(UI.QMessageBox, "question",
+                               staticmethod(lambda *a, **k: answer)):
+            self.dialog._delete_arrived()
+
+    def test_one_row_goes_the_others_stay(self):
+        table = self.dialog.arrived
+        target = next(r for r in range(table.rowCount())
+                     if table.item(r, 1).text() == "Sale!")
+        self._delete([target], UI.QMessageBox.Yes)
+        data = CB.get_worklist().load(self.dialog._root())
+        subjects = {e["subject"] for e in data["arrived"]}
+        self.assertEqual(subjects, {"Enquiry", "Newsletter"})
+
+    def test_several_at_once(self):
+        table = self.dialog.arrived
+        targets = [r for r in range(table.rowCount())
+                  if table.item(r, 1).text() in ("Sale!", "Newsletter")]
+        self._delete(targets, UI.QMessageBox.Yes)
+        data = CB.get_worklist().load(self.dialog._root())
+        subjects = {e["subject"] for e in data["arrived"]}
+        self.assertEqual(subjects, {"Enquiry"})
+
+    def test_saying_no_deletes_nothing(self):
+        self._delete([0], UI.QMessageBox.No)
+        data = CB.get_worklist().load(self.dialog._root())
+        self.assertEqual(len(data["arrived"]), 3)
+
+    def test_nothing_selected_asks_nothing(self):
+        self.dialog.arrived.clearSelection()
+        with mock.patch.object(UI.QMessageBox, "information") as info:
+            self.dialog._delete_arrived()
+        info.assert_called_once()
+        data = CB.get_worklist().load(self.dialog._root())
+        self.assertEqual(len(data["arrived"]), 3)
+
+
+class ResettingEverything(unittest.TestCase):
+    """The one-button "start over": the whole register, every worklist
+    log, and each mailbox's read bookmark — not just what's on screen."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.cfg = ready_cfg(self.folder)
+        self.cfg["inquiry"]["account"]["state"] = {
+            "uidvalidity": 7, "last_uid": 42}
+        self.dialog = UI.InquiryDialog(self.cfg)
+        row = register.from_message(message())
+        register.save([row], mailflow.Paths(self.folder).register_csv)
+        known = triage.Knowledge.from_dict(self.cfg["inquiry"]["knowledge"])
+        msg = message("Enquiry")
+        result = mailflow.Result()
+        result.sorted_mail = [(msg, triage.rules_pass(msg, known))]
+        self.dialog._fill_arrived(result)
+        CB.get_worklist().append(self.folder, "orders", [
+            {"message_id": "<o@x>", "subject": "PO 1", "date": "2026-08-20"}])
+
+    def _reset(self, answer):
+        with mock.patch.object(UI.QMessageBox, "question",
+                               staticmethod(lambda *a, **k: answer)):
+            with _NoSave():
+                self.dialog._reset_everything()
+
+    def test_the_register_is_emptied(self):
+        self._reset(UI.QMessageBox.Yes)
+        self.assertEqual(
+            register.load(mailflow.Paths(self.folder).register_csv), [])
+
+    def test_every_worklist_kind_is_emptied(self):
+        self._reset(UI.QMessageBox.Yes)
+        data = CB.get_worklist().load(self.folder)
+        for kind in CB.get_worklist().KINDS:
+            self.assertEqual(data[kind], [], kind)
+
+    def test_the_read_bookmark_goes_back_to_the_start(self):
+        self._reset(UI.QMessageBox.Yes)
+        state = self.dialog.cfg["inquiry"]["state"]
+        self.assertEqual(state, {"uidvalidity": 0, "last_uid": 0})
+
+    def test_the_table_on_screen_goes_blank_too(self):
+        self._reset(UI.QMessageBox.Yes)
+        self.assertEqual(self.dialog.arrived.rowCount(), 0)
+
+    def test_saying_no_touches_nothing(self):
+        self._reset(UI.QMessageBox.No)
+        self.assertEqual(
+            len(register.load(mailflow.Paths(self.folder).register_csv)), 1)
+        data = CB.get_worklist().load(self.folder)
+        self.assertEqual(len(data["arrived"]), 1)
+        self.assertEqual(len(data["orders"]), 1)
 
 
 class PickingYourOwnDates(unittest.TestCase):

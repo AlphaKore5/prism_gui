@@ -107,7 +107,7 @@ class StepApplyWorker(_Worker):
             import shutil
             SF = CB.get_stepfile()
             names = SF.names(self.report)
-            out_path = os.path.join(self.out_dir, names["modified"])
+            out_path = os.path.join(self.out_dir, SF.modified_name(self.report))
             built = SF.apply_plan(self.path, self.plan, out_path)
             after = SF.analyse(out_path, mode=self.mode, k_factor=self.k_factor)
             try:

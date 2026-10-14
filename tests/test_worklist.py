@@ -247,6 +247,85 @@ class UpdatingOneRow(unittest.TestCase):
         self.assertEqual(data["arrived"][0]["category"], "other")
 
 
+class DeletingEntriesForGood(unittest.TestCase):
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        worklist.append(self.folder, "arrived", [
+            {"message_id": "<a@x>", "subject": "Enquiry", "date": "2026-08-20"},
+            {"message_id": "<b@x>", "subject": "Sale!", "date": "2026-08-21"},
+            {"message_id": "<c@x>", "subject": "Newsletter", "date": "2026-08-22"},
+        ])
+
+    def test_one_entry_goes_the_others_stay(self):
+        worklist.remove(self.folder, "arrived", ["<b@x>"])
+        data = worklist.load(self.folder)
+        subjects = [r["subject"] for r in data["arrived"]]
+        self.assertEqual(subjects, ["Enquiry", "Newsletter"])
+
+    def test_several_at_once(self):
+        worklist.remove(self.folder, "arrived", ["<a@x>", "<c@x>"])
+        data = worklist.load(self.folder)
+        self.assertEqual([r["subject"] for r in data["arrived"]], ["Sale!"])
+
+    def test_an_unknown_key_does_nothing(self):
+        worklist.remove(self.folder, "arrived", ["<missing@x>"])
+        data = worklist.load(self.folder)
+        self.assertEqual(len(data["arrived"]), 3)
+
+    def test_an_entry_with_no_message_id_is_matched_by_its_fallback_key(self):
+        worklist.append(self.folder, "arrived", [
+            {"from_addr": "x@y.com", "subject": "No id", "date": "2026-08-23"}])
+        fallback_key = "x@y.com|No id|2026-08-23"
+        worklist.remove(self.folder, "arrived", [fallback_key])
+        data = worklist.load(self.folder)
+        self.assertNotIn("No id", [r.get("subject") for r in data["arrived"]])
+
+    def test_it_survives_being_read_back_by_a_fresh_load(self):
+        worklist.remove(self.folder, "arrived", ["<b@x>"])
+        data = worklist.load(self.folder)
+        self.assertEqual(len(data["arrived"]), 2)
+
+
+class WipingAKindForGood(unittest.TestCase):
+    """clear() is the one-button "start over" behind remove() — every
+    entry in a kind goes, nothing named, nothing archived."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        worklist.append(self.folder, "arrived", [
+            {"message_id": "<a@x>", "subject": "Enquiry", "date": "2026-08-20"},
+            {"message_id": "<b@x>", "subject": "Sale!", "date": "2026-08-21"},
+        ])
+        worklist.append(self.folder, "orders", [
+            {"message_id": "<o@x>", "subject": "PO 12", "date": "2026-08-22"},
+        ])
+
+    def test_every_entry_in_that_kind_is_gone(self):
+        worklist.clear(self.folder, "arrived")
+        data = worklist.load(self.folder)
+        self.assertEqual(data["arrived"], [])
+
+    def test_other_kinds_are_left_alone(self):
+        worklist.clear(self.folder, "arrived")
+        data = worklist.load(self.folder)
+        self.assertEqual(len(data["orders"]), 1)
+
+    def test_it_survives_being_read_back_by_a_fresh_load(self):
+        worklist.clear(self.folder, "arrived")
+        data = worklist.load(self.folder)
+        self.assertEqual(data["arrived"], [])
+
+    def test_clearing_an_already_empty_kind_does_not_error(self):
+        worklist.clear(self.folder, "replies")
+        data = worklist.load(self.folder)
+        self.assertEqual(data["replies"], [])
+
+    def test_an_unknown_kind_is_rejected(self):
+        with self.assertRaises(ValueError):
+            worklist.clear(self.folder, "not-a-kind")
+
+
 class TheArrivedLogNeverTrimsForBeingOld(unittest.TestCase):
 
     def test_arrived_has_no_resolved_flag_added(self):

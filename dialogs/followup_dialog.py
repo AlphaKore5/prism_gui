@@ -139,7 +139,8 @@ class FollowupDialog(PrismDialog):
     after exec()."""
 
     def __init__(self, result_summary: str = "", parent=None,
-                 artifacts: list[str] | None = None):
+                 artifacts: list[str] | None = None,
+                 quick_actions: list[tuple[str, str, str]] | None = None):
         super().__init__(
             i18n.t("Anything to change?"),
             i18n.t("The task is done. Tell Prism what to adjust and it will "
@@ -151,6 +152,7 @@ class FollowupDialog(PrismDialog):
         self.setMinimumSize(580, 520)
 
         self._submitted = False
+        self._quick_key = ""
         self._paths: list[str] = []
         self._artifacts = [p for p in (artifacts or []) if p
                            and not p.endswith(".link.txt") and os.path.isfile(p)]
@@ -177,6 +179,10 @@ class FollowupDialog(PrismDialog):
             self.footer.add_utility(
                 self.button(i18n.t("Open folder"), icon_name="folder",
                             on_click=self._open_artifacts_folder))
+        for key, label, prompt in quick_actions or []:
+            self.footer.add_utility(
+                self.button(label, icon_name="check",
+                            on_click=lambda _=False, k=key, p=prompt: self._quick(k, p)))
         self.footer.add_secondary(
             self.button(i18n.t("No, I'm done"), on_click=self.reject))
         self.footer.set_primary(
@@ -193,6 +199,15 @@ class FollowupDialog(PrismDialog):
 
     def file_paths(self) -> list[str]:
         return list(self._paths)
+
+    def chosen_quick(self) -> str:
+        """The key of the one-click action pressed, or "" if none was."""
+        return self._quick_key
+
+    def _quick(self, key: str, prompt: str):
+        self._quick_key = key
+        self._note.setPlainText(prompt)
+        self._note.setFocus()
 
     # ── UI builders ───────────────────────────────────────────────────────
     def _build_deliverables_section(self) -> QWidget:

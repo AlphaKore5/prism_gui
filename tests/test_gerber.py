@@ -336,6 +336,27 @@ class DrillsSurviveBothFormatsTheyArriveIn(unittest.TestCase):
         self.assertIsNone(job["answers"]["drill_count"])
         self.assertTrue(any("No drill file" in w for w in job["warnings"]))
 
+    def test_a_stray_tool_table_line_in_an_unrelated_text_file_is_not_a_drill(self):
+        """A real report, from a fab engineer testing a job with no drill
+        data at all: a plain text file with nothing to do with drilling —
+        a tool note starting its own line with "T1 C .031", and, further
+        down, an unrelated dimension line starting with "X" — was enough
+        to be read as a complete Excellon file (no `%` to find the real
+        body with, so every line, including that dimension line, was
+        scanned for holes), reporting drilled holes on a job that has
+        none at all."""
+        d = tempfile.mkdtemp()
+        _write(d, "job.gtl", COPPER)
+        _write(d, "notes.txt", """
+            T1C.031
+            See sheet 2 for the panel border
+            X12.500Y8.300 is the corner of that panel, not a hole
+            """)
+        job = G.analyse(G.gather([d]))
+        self.assertIsNone(job["answers"]["drill_count"])
+        self.assertIsNone(job["answers"]["min_drill_mm"])
+        self.assertTrue(any("No drill file" in w for w in job["warnings"]))
+
 
 @_NEEDS_SHAPELY
 class ModalCodesAndPolarityOrder(unittest.TestCase):
@@ -669,6 +690,17 @@ class TheOverloadedTxtExtension(unittest.TestCase):
             M02*
             """)
         self.assertEqual(G.classify([path])[0]["role"], "drill_gerber")
+
+    def test_a_stray_tool_line_with_no_percent_is_not_read_as_a_drill(self):
+        """Same bug as DrillsSurviveBothFormatsTheyArriveIn's version of
+        this test, isolated to classify() itself: without a `%` anywhere,
+        a line that merely LOOKS like a tool select is not enough."""
+        d = tempfile.mkdtemp()
+        path = _write(d, "job.txt", """
+            T1C.031
+            X12.500Y8.300 is a dimension note, not a hole
+            """)
+        self.assertNotEqual(G.classify([path])[0]["role"], "drill")
 
     def test_a_prose_txt_is_a_report_and_is_measured_from_nothing(self):
         d = tempfile.mkdtemp()

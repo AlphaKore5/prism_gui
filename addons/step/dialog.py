@@ -9,11 +9,13 @@ the parts (a PNG Prism drew, not the model). The three actions:
     Draft  — measure, then the image tool draws a dimensioned drawing sheet
              FROM THE NUMBERS (auto_brief) — the model stays here.
     Ask    — measure, then Groq suggests improvements from the numbers and
-             the question, and a reviewing agent turns them into an exact
-             change plan shown on a review page. Nothing is built.
-    Edit   — Ask, then — after the person confirms against the review page
-             — the plan is applied to a COPY of the model, locally, and the
-             copy is re-measured so the After column is real, not predicted.
+             the question. That answer IS the deliverable — nothing is
+             planned, nothing is built, no page opens.
+    Edit   — measure, get Groq's suggestions, then a reviewing agent turns
+             them into an exact change plan shown on a review page; after
+             the person confirms against that page, the plan is applied to
+             a COPY of the model, locally, and the copy is re-measured so
+             the After column is real, not predicted.
 
 Several models can be attached at once; each is measured into its own
 folder, named after it, under the folder the person chose (asked once, the
@@ -22,6 +24,7 @@ model's own name — see core.stepfile.names().
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 
@@ -30,12 +33,13 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
-    QProgressBar, QRadioButton, QVBoxLayout, QWidget,
+    QProgressBar, QRadioButton, QTextBrowser, QVBoxLayout, QWidget,
 )
 
 import core_bridge as CB
 import i18n
 import theme
+from dialogs.answer_dialog import AnswerDialog
 from dialogs.base import PrismDialog
 from workers import AutomationWorker
 from addons.step.workers import (StepApplyWorker, StepAskWorker,
@@ -56,13 +60,83 @@ ACTIONS = (
      "independent check on the numbers, only a different look."),
     ("ask", "Ask",
      "Measure, then get suggestions for the part from the numbers and your "
-     "question, reviewed into an exact change plan you can read. Nothing "
-     "is changed."),
+     "question. Just the answer — nothing is planned, built or opened."),
     ("edit", "Edit",
-     "Ask, then — once you confirm against the review page — apply the "
-     "plan to a COPY of the model, here, and re-measure it. The original "
-     "is never touched."),
+     "Measure, get suggestions, then review an exact change plan and — "
+     "once you confirm — apply it to a COPY of the model, here, and "
+     "re-measure it. The original is never touched."),
 )
+
+# What the footer's one button says and does, per selected action — so the
+# single button a person must press always names the actual result ("Make
+# the Changes", not a generic "Generate") instead of making them trust a
+# separate radio choice they might not remember making.
+ACTION_BUTTON = {
+    "draft": ("Measure and Draw", "grid"),
+    "ask": ("Get the Answer", "chat"),
+    "edit": ("Make the Changes", "pencil"),
+}
+
+# (cfg value, label) — who answers Ask/Edit's question. Groq is a direct,
+# near-instant API call; the other three are the SAME background-Chrome
+# automation Draft and Edit's plan stage already use to reach a tool —
+# slower (roughly 10-60s), but a stronger model than the small one Groq
+# runs here.
+MODEL_CHOICES = (
+    ("Groq", "Groq (fast, in-house)"),
+    ("ChatGPT", "ChatGPT"),
+    ("Claude", "Claude"),
+)
+
+# Deliberately no Gemini. "Google Gemini" is registered in agents._MAKES as
+# an image generator — core.automation._maker_brief() wraps EVERY stage
+# routed to that name with "what I need from you is generated images...
+# build it here", regardless of what the stage's own prompt says, by
+# design (it exists specifically to override a text-shaped ask). A plain
+# Q&A prompt sent to it comes back as a refused image request, not an
+# answer — confirmed live. Fixable only by giving Gemini a second,
+# non-maker agent identity in the engine; out of scope here, so it is left
+# out rather than shipped broken.
+#
+# If the chosen model can't answer, retry in this fixed, quality-ordered
+# chain — never silently back to Groq, which is the thing being upgraded
+# away from. Whichever was already tried as the primary pick is skipped.
+FALLBACK_ORDER = ("ChatGPT", "Claude")
+
+
+class PlanReviewDialog(PrismDialog):
+    """The review page, shown inside Prism instead of a separate browser
+    tab. Opening an external page and then immediately asking Yes/No in a
+    native popup used to race for focus — the browser usually won, so the
+    confirm sat there unseen behind it, and a build that looked declined
+    was really just never answered. Loading the SAME generated HTML here
+    removes the race outright: nothing can end up behind anything else."""
+
+    def __init__(self, title: str, subtitle: str, review_path: str,
+                can_build: bool, parent=None):
+        super().__init__(title, subtitle, icon="pencil", parent=parent)
+        self.resize(880, 680)
+        self.setMinimumSize(560, 420)
+        self.review_path = review_path
+
+        self.view = QTextBrowser()
+        self.view.setOpenExternalLinks(True)
+        self.view.setSource(QUrl.fromLocalFile(review_path))
+        self.body.addWidget(self.view, stretch=1)
+
+        self.footer.add_utility(self.button(
+            i18n.t("Open as a file"), on_click=self._open_file))
+        if can_build:
+            self.footer.add_secondary(self.button(
+                i18n.t("Cancel"), on_click=self.reject))
+            self.footer.set_primary(self.button(
+                i18n.t("Build it"), "primary", on_click=self.accept))
+        else:
+            self.footer.set_primary(self.button(
+                i18n.t("Close"), "primary", on_click=self.accept))
+
+    def _open_file(self):
+        QDesktopServices.openUrl(QUrl.fromLocalFile(self.review_path))
 
 
 class StepDialog(PrismDialog):
@@ -87,8 +161,13 @@ class StepDialog(PrismDialog):
         self._agent_worker = None
         self._ask_worker = None
         self._apply_worker = None
+        self._followup_ask_worker = None
+        self._followup_agent_worker = None
+        self._built_from_popup = False
         self._links: dict = {}
         self._responses: dict = {}
+        self._stage_agents_map: dict = {}
+        self._model_chain: list[str] = []
         self._made_files: list = []
         self._notes: list[str] = []
 
@@ -113,6 +192,7 @@ class StepDialog(PrismDialog):
             "this lighter?\" or \"fit M8 bolts instead of M6\". Draft needs "
             "no text.")
         self.ask.files_added.connect(self._on_files_added)
+        self.ask.file_removed.connect(self._on_file_removed)
         root.addWidget(self.ask)
 
         # The confidentiality promise, stated as a real notice — same as
@@ -252,6 +332,30 @@ class StepDialog(PrismDialog):
         indent_l.addWidget(self.ai_draft_cb)
         act_v.addWidget(indent)
         step2_v.addWidget(act_box)
+
+        # Who answers Ask/Edit's question — only matters once a question is
+        # actually asked, but shown alongside the action so the choice is
+        # made before pressing Generate, not discovered after.
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel(i18n.t("Answer with:")))
+        self.model_combo = QComboBox()
+        for key, label in MODEL_CHOICES:
+            self.model_combo.addItem(i18n.t(label), key)
+        saved_model = self.cfg.get("step_ask_model", "Groq")
+        idx = self.model_combo.findData(saved_model)
+        self.model_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        model_row.addWidget(self.model_combo)
+        model_row.addStretch(1)
+        step2_v.addLayout(model_row)
+        model_hint = QLabel(i18n.t(
+            "Groq answers in seconds. ChatGPT and Claude are stronger but "
+            "slower — driven in a background Chrome window. If the one "
+            "you pick can't answer, Prism tries the other one."))
+        model_hint.setWordWrap(True)
+        model_hint.setStyleSheet(
+            f"color: {theme.NEUTRAL[700]}; font-size: 12.5px;")
+        step2_v.addWidget(model_hint)
+
         self.step2.setVisible(False)
         root.addWidget(self.step2)
 
@@ -345,12 +449,20 @@ class StepDialog(PrismDialog):
         self.footer.add_utility(self.open_btn)
         self.footer.add_secondary(
             self.button(i18n.t("Close"), on_click=self.reject))
-        self.generate_btn = self.button(i18n.t("Generate"), "primary",
-                                        icon_name="grid",
+        draft_label, draft_icon = ACTION_BUTTON["draft"]
+        self.generate_btn = self.button(i18n.t(draft_label), "primary",
+                                        icon_name=draft_icon,
                                         on_click=self._generate)
         self.generate_btn.setEnabled(False)
         self.generate_btn.setToolTip(i18n.t("Attach a model first"))
         self.footer.set_primary(self.generate_btn)
+        # The one button a person must press always names the action it is
+        # about to take — never a generic "Generate" they have to trust a
+        # radio choice above it to interpret correctly.
+        for radio in self._action_buttons.values():
+            radio.toggled.connect(
+                lambda checked: self._sync_generate_label() if checked
+                else None)
 
         if attachments:
             self._on_files_added([a["path"] for a in attachments])
@@ -446,14 +558,35 @@ class StepDialog(PrismDialog):
                      "Generate.")
             + (f"  {skipped}" if skipped else ""))
 
+    def _on_file_removed(self, path: str):
+        """The chip's own 'x' only ever touched AskPanel's private list —
+        this keeps the dialog's real one (what Generate actually measures)
+        in step with what the person sees attached."""
+        if path in self.paths:
+            self.paths.remove(path)
+        self.step2.setVisible(bool(self.paths))
+        self.generate_btn.setEnabled(bool(self.paths))
+        n = len(self.paths)
+        self.status.setText(
+            i18n.t("{n} models attached.").format(n=n) if n else
+            i18n.t("No model attached yet."))
+
     def _action(self) -> str:
         for key, radio in self._action_buttons.items():
             if radio.isChecked():
                 return key
         return "draft"
 
+    def _sync_generate_label(self):
+        label, icon = ACTION_BUTTON[self._action()]
+        self.generate_btn.setText(i18n.t(label))
+        icons.button_icon(self.generate_btn, icon, 15, theme.CARD)
+
     def _mode(self) -> str:
         return self.mode_combo.currentText().strip() or "metal"
+
+    def _chosen_model(self) -> str:
+        return self.model_combo.currentData() or "Groq"
 
     def _k_factor(self) -> float:
         """0.0 means "use Prism's default" — a blank box, or anything
@@ -501,10 +634,10 @@ class StepDialog(PrismDialog):
                     "Say what you want to know or change — type the "
                     "question in the box above."))
                 return
-            if not self.cfg.get("api_key"):
+            if self._chosen_model() == "Groq" and not self.cfg.get("api_key"):
                 QMessageBox.warning(self, "STEP", i18n.t(
-                    "Ask and Edit start with Groq — add your Groq key in "
-                    "Settings first."))
+                    "Groq needs your key — add it in Settings, or pick "
+                    "ChatGPT or Claude above instead."))
                 return
         if action == "edit" and not self._planner():
             QMessageBox.warning(self, "STEP", i18n.t(
@@ -517,6 +650,7 @@ class StepDialog(PrismDialog):
         self.cfg["step_mode"] = self._mode()
         self.cfg["step_k_factor"] = self.k_edit.text().strip()
         self.cfg["step_ai_draft"] = self.ai_draft_cb.isChecked()
+        self.cfg["step_ask_model"] = self._chosen_model()
         try:
             CB.config.save(self.cfg)
         except Exception:                               # noqa: BLE001
@@ -692,6 +826,7 @@ class StepDialog(PrismDialog):
                 pass
         texts = [t for t in (responses.get("visual") or []) if t.strip()]
         self._responses[f"draft · {report['stem']}"] = texts
+        self._stage_agents_map[f"draft · {report['stem']}"] = self._artist()
         if kept:
             self._notes.append(f"{report['file']}: AI drawing sheet → "
                                + "; ".join(kept))
@@ -711,6 +846,15 @@ class StepDialog(PrismDialog):
 
     def _ask(self, m: dict):
         report = m["report"]
+        model = self._chosen_model()
+        if model != "Groq":
+            # Chosen over Groq's fast in-house call. If it can't answer,
+            # retry the rest of FALLBACK_ORDER — never silently fall back
+            # TO Groq, which is the thing being upgraded away from.
+            self._model_chain = [model] + [t for t in FALLBACK_ORDER
+                                           if t != model]
+            self._ask_via_chain(m)
+            return
         self._set_busy(True, i18n.t(
             "Asking Groq about {file} — the measured numbers and your "
             "question only; the model stays here…")
@@ -721,18 +865,160 @@ class StepDialog(PrismDialog):
         self._ask_worker.failed.connect(self._on_failed)
         self._ask_worker.start()
 
-    def _on_suggested(self, suggestions: str):
+    def _ask_via_chain(self, m: dict):
+        report = m["report"]
+        if not self._model_chain:
+            self._on_failed(i18n.t(
+                "Neither ChatGPT nor Claude could answer for "
+                "{file}.").replace("{file}", report["file"]))
+            return
+        tool = self._model_chain.pop(0)
+        self._set_busy(True, i18n.t(
+            "Asking {tool} about {file} — the measured numbers and your "
+            "question only; the model stays here…")
+            .replace("{tool}", tool).replace("{file}", report["file"]))
+        self._agent_worker = AutomationWorker(
+            {}, self.cfg, [], f"STEP — ask {tool} about {report['file']}",
+            custom_stages=[("ask", tool, [self.sf.ask_prompt(
+                report, self.ask.text().strip())])],
+            chatgpt_analysis=False, failover=False)
+        self._agent_worker.done.connect(
+            lambda responses, links, m=m, tool=tool:
+                self._on_asked_by_tool(m, tool, responses, links))
+        self._agent_worker.failed.connect(lambda _e, m=m: self._ask_via_chain(m))
+        self._agent_worker.start()
+
+    def _on_asked_by_tool(self, m: dict, tool: str, responses: dict,
+                          links: dict):
+        texts = [t for t in (responses.get("ask") or []) if t.strip()]
+        if not texts:
+            self._ask_via_chain(m)
+            return
+        if links.get("ask"):
+            self._links[f"ask · {m['report']['stem']}"] = links["ask"]
+        self._model_chain = []
+        self._on_suggested(texts[0], agent=tool)
+
+    # ── the conversation, saved to one file per model ──────────────────────
+    # "ask · stem" is already scoped to the model, not the exact question —
+    # every Ask/Edit on the same attached model, and every follow-up inside
+    # each one, is one running conversation about THAT PART, the same way a
+    # chatbot thread would be. Saved as plain JSON reads back as a list of
+    # [speaker, text] pairs with nothing else to parse.
+    #
+    # Deliberately NOT inside m["out_dir"]: core.stepfile.output_dir() gives
+    # every fresh measurement of the same model its own numbered sibling
+    # folder ("PET CORE (2)", "(3)", …) so a re-measure never overwrites the
+    # last one's sheet — which means that folder is a NEW path on every
+    # single run, never the same twice. A conversation file written there
+    # would never be found again; caught live, by actually simulating a
+    # second session rather than trusting the first one's save. The stable
+    # thing is the root the person chose (_root()) plus the model's own
+    # stem, so it sits beside every numbered run folder rather than inside
+    # any one of them.
+    def _conversation_path(self, m: dict) -> str:
+        stem = m["report"]["stem"]
+        return os.path.join(self._root(), self.sf.names(stem)["conversation"])
+
+    def _load_conversation(self, m: dict) -> list:
+        path = self._conversation_path(m)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return [(s, t) for s, t in data] if isinstance(data, list) else []
+        except (OSError, ValueError):
+            return []
+
+    def _save_conversation(self, m: dict, thread: list):
+        try:
+            with open(self._conversation_path(m), "w", encoding="utf-8") as f:
+                json.dump(thread, f, ensure_ascii=False, indent=2)
+        except OSError:
+            pass
+
+    def _on_suggested(self, suggestions: str, agent: str = "Groq"):
         m = self._current
         report = m["report"]
-        self._responses[f"groq · {report['stem']}"] = [suggestions]
+        key = f"ask · {report['stem']}"
+        self._responses[key] = [suggestions]
+        self._stage_agents_map[key] = agent
+        is_edit = self._action() == "edit"
+        answer_dlg = AnswerDialog(
+            i18n.t("STEP — Answer"),
+            i18n.t("{file} · answered by {agent}").replace(
+                "{file}", report["file"]).replace("{agent}", agent),
+            self.ask.text().strip(), suggestions, agent, self,
+            allow_followup=True, model_choices=MODEL_CHOICES,
+            allow_build=is_edit,
+            prior_thread=self._load_conversation(m),
+            on_change=lambda thread, m=m: self._save_conversation(m, thread))
+        answer_dlg.followup_requested.connect(
+            lambda text, chosen, m=m, key=key, dlg=answer_dlg:
+                self._on_answer_followup(dlg, m, key, chosen, text))
+        # "Build this" — the person may click it any number of times
+        # before closing (each follow-up's answer is a fresh thing worth
+        # being able to build), so this does NOT close the popup itself.
+        answer_dlg.build_requested.connect(
+            lambda m=m, key=key, dlg=answer_dlg:
+                self._build_plan_for(m, key, dlg))
+        answer_dlg.exec()
+        # self._responses[key] is the latest version — the original answer,
+        # or whatever a follow-up replaced it with while the popup was open.
+        suggestions = self._responses[key][0]
         self.result.appendPlainText(
-            f"═══ {report['file']} — suggestions (from the measured "
-            f"figures) ═══\n{suggestions}\n")
+            f"═══ {report['file']} — suggestions from {agent} (from the "
+            f"measured figures) ═══\n{suggestions}\n")
+        if not is_edit:
+            # Ask's whole deliverable is the answer above — no plan, no
+            # review page, nothing opened, ever, automatically. Only Edit
+            # builds, and only on request (the "Build this" button above,
+            # or automatically once, below, for a fresh Edit's own first
+            # answer) — never a follow-up read back later and assumed.
+            self._notes.append(f"{report['file']}: suggestions only — "
+                               "choose Edit to turn this into a change "
+                               "plan")
+            self._next()
+            return
+        if self._built_from_popup:
+            # "Build this" already ran the plan/build cycle (maybe more
+            # than once) while the popup was open — the queue moves on
+            # without doing it a second time, automatically, on the
+            # original answer.
+            self._built_from_popup = False
+            self._next()
+            return
+        # The ordinary, first-time path: a fresh Edit's own answer, never
+        # followed up on, builds automatically once the popup closes —
+        # unchanged from before "Build this" existed.
+        self._build_plan_for(m, key, None)
+
+    def _build_plan_for(self, m: dict, key: str, popup: "AnswerDialog | None"):
+        """Turn whatever is CURRENTLY saved at `key` into a plan, then (if
+        confirmed) a build — the same pipeline a fresh Edit's own first
+        answer already ran automatically, now reachable on demand from
+        any follow-up too, including one on a conversation reopened long
+        after the original build finished and its popup closed."""
+        report = m["report"]
+        suggestions = self._responses[key][0]
+        if popup is not None:
+            # "Build this" clicked from WITHIN the popup, while
+            # _on_suggested's own .exec() call is still on the stack —
+            # mark it so that call's own continuation (the automatic,
+            # first-time build) skips running a second time once the
+            # popup finally closes.
+            self._built_from_popup = True
+            popup.set_busy(True)
         planner = self._planner()
         if not planner:
-            self._notes.append(f"{report['file']}: suggestions only — no "
-                               "reasoning tool set up to plan changes")
-            self._next()
+            msg = i18n.t("Edit needs a reasoning tool to review the plan "
+                         "— open Agents and pick one for Reasoning first.")
+            if popup is not None:
+                popup.set_busy(False)
+                QMessageBox.warning(self, "STEP", msg)
+            else:
+                self._notes.append(f"{report['file']}: suggestions only — "
+                                   "no reasoning tool set up to plan "
+                                   "changes")
             return
         files = []
         png = (m.get("drawn") or {}).get("png")
@@ -741,29 +1027,134 @@ class StepDialog(PrismDialog):
                 files.append(CB.files.attach(png))
             except Exception:                           # noqa: BLE001
                 pass
-        self._set_busy(True, i18n.t(
-            "{agent} is reviewing the suggestions into an exact change "
-            "plan for {file}…")
-            .replace("{agent}", planner).replace("{file}", report["file"]))
+        if popup is not None:
+            popup.set_busy(True)
+        else:
+            self._set_busy(True, i18n.t(
+                "{agent} is reviewing the suggestions into an exact change "
+                "plan for {file}…")
+                .replace("{agent}", planner).replace("{file}", report["file"]))
         self._agent_worker = AutomationWorker(
             {}, self.cfg, files,
             f"STEP — review and plan CAD changes for {report['file']}",
             custom_stages=[("plan", planner, [self.sf.plan_prompt(
                 report, self.ask.text().strip(), suggestions)])],
             chatgpt_analysis=False)
-        self._agent_worker.done.connect(self._on_planned)
-        self._agent_worker.failed.connect(self._on_failed)
+        self._agent_worker.done.connect(
+            lambda responses, links, m=m, popup=popup:
+                self._on_planned(responses, links, m=m, popup=popup))
+        self._agent_worker.failed.connect(
+            lambda err, popup=popup: self._on_build_failed(err, popup))
         self._agent_worker.start()
 
-    def _on_planned(self, responses: dict, links: dict):
-        m = self._current
+    def _on_build_failed(self, error: str, popup):
+        if popup is not None:
+            popup.set_busy(False)
+            QMessageBox.warning(self, "STEP", error)
+        else:
+            self._on_failed(error)
+
+    # ── a follow-up typed inside the answer popup ─────────────────────────
+
+    def _on_answer_followup(self, dlg: AnswerDialog, m: dict, key: str,
+                            agent: str, text: str):
+        """`agent` is whatever was selected in the popup's own "Reply as"
+        picker when Send was pressed — the same one that answered first,
+        by default, but the person may have switched it."""
+        report = m["report"]
+        dlg.set_busy(True)
+        if agent == "Groq":
+            composed = (
+                "(This is a follow-up to a question already answered "
+                f"above.) Earlier question: {self.ask.text().strip()}\n\n"
+                f"Your earlier answer:\n{self._responses[key][0]}\n\n"
+                f"Follow-up: {text}")
+            self._followup_ask_worker = StepAskWorker(
+                self.cfg, report, composed)
+            self._followup_ask_worker.done.connect(
+                lambda answer, dlg=dlg, key=key:
+                    self._on_answer_followup_done(dlg, key, answer))
+            self._followup_ask_worker.failed.connect(
+                lambda err, dlg=dlg: self._on_answer_followup_failed(
+                    dlg, err))
+            self._followup_ask_worker.start()
+            return
+        # A real chat already exists for THIS agent — resume IT rather than
+        # starting a fresh one, so it answers with the earlier turn as
+        # context instead of being re-sent the whole job from scratch. If
+        # the person switched to a DIFFERENT agent than the one that
+        # answered before, there is no chat of theirs to resume — give it
+        # the same context Groq's follow-up gets instead, in the prompt.
+        same_agent = self._stage_agents_map.get(key) == agent
+        resume = ({"ask": self._links[key]}
+                 if same_agent and self._links.get(key) else None)
+        prompt = text if resume else (
+            "(This is a follow-up to a question a different tool already "
+            f"answered.) Earlier question: {self.ask.text().strip()}\n\n"
+            f"The earlier answer was:\n{self._responses[key][0]}\n\n"
+            f"Follow-up: {text}")
+        self._followup_agent_worker = AutomationWorker(
+            {}, self.cfg, [],
+            f"STEP — follow-up with {agent} on {report['file']}",
+            custom_stages=[("ask", agent, [prompt])], chatgpt_analysis=False,
+            failover=False, resume_urls=resume, followup=True)
+        self._followup_agent_worker.done.connect(
+            lambda responses, links, dlg=dlg, key=key, agent=agent:
+                self._on_answer_followup_agent_done(
+                    dlg, key, agent, responses, links))
+        self._followup_agent_worker.failed.connect(
+            lambda err, dlg=dlg: self._on_answer_followup_failed(dlg, err))
+        self._followup_agent_worker.start()
+
+    def _on_answer_followup_done(self, dlg: AnswerDialog, key: str,
+                                 answer: str):
+        self._responses[key] = [answer]
+        self._stage_agents_map[key] = "Groq"
+        dlg.set_busy(False)
+        dlg.set_answer(answer, "Groq")
+
+    def _on_answer_followup_agent_done(self, dlg: AnswerDialog, key: str,
+                                       agent: str, responses: dict,
+                                       links: dict):
+        texts = [t for t in (responses.get("ask") or []) if t.strip()]
+        if not texts:
+            self._on_answer_followup_failed(
+                dlg, i18n.t("{agent} didn't answer the follow-up.")
+                .replace("{agent}", agent))
+            return
+        if links.get("ask"):
+            self._links[key] = links["ask"]
+        self._responses[key] = [texts[0]]
+        self._stage_agents_map[key] = agent
+        dlg.set_busy(False)
+        dlg.set_answer(texts[0], agent)
+
+    def _on_answer_followup_failed(self, dlg: AnswerDialog, error: str):
+        dlg.set_busy(False)
+        QMessageBox.warning(self, "STEP", error)
+
+    def _on_planned(self, responses: dict, links: dict, m: dict = None,
+                    popup=None):
+        """`popup` is the AnswerDialog this plan was requested from, or
+        None for the original automatic path (a fresh Edit's own first
+        answer, which drives the model queue via `self._next()`).
+        "Build this" clicked from a popup — possibly reopened long after
+        the original run finished — never touches the queue: the popup
+        just stays open, built or not, for as long as the person wants
+        it."""
+        m = m or self._current
         report, out_dir = m["report"], m["out_dir"]
         self._links.update({f"{k} · {report['stem']}": v
                             for k, v in links.items()})
         texts = [t for t in (responses.get("plan") or []) if t.strip()]
         self._responses[f"plan · {report['stem']}"] = texts
+        self._stage_agents_map[f"plan · {report['stem']}"] = self._planner()
         plan, why = self.sf.parse_plan(texts)
         if plan is None:
+            if popup is not None:
+                popup.set_busy(False)
+                QMessageBox.warning(self, "STEP", why)
+                return
             self._notes.append(f"{report['file']}: {why}")
             self.result.appendPlainText(f"{report['file']} — {why}")
             self._next()
@@ -779,42 +1170,53 @@ class StepDialog(PrismDialog):
             lines.append(f"  • (for the designer) {a}")
         question = self.ask.text().strip()
         review = self.sf.review_html(report, plan, out_dir, question=question)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(review))
         self.result.appendPlainText(
             f"{report['file']} — the plan (review page → {review}):\n"
             + ("\n".join(lines) if lines else "  nothing Prism can apply by "
                                              "itself — the advice is the "
                                              "deliverable") + "\n")
-        if self._action() != "edit" or not plan["changes"]:
-            self._notes.append(f"{report['file']}: plan reviewed → {review}")
-            self._next()
-            return
-        # Edit: the person confirms against the page they can SEE, and only
-        # then is a copy built. The original file is never written.
+        can_build = bool(plan["changes"])
         out = self.sf.names(report)
-        answer = QMessageBox.question(
-            self, "STEP",
-            i18n.t("Reviewed the page for {file}? Build {name} now? The "
-                   "original file is never touched.")
-            .replace("{file}", report["file"]).replace("{name}", out["modified"]),
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-        if answer != QMessageBox.Yes:
+        if popup is not None:
+            popup.set_busy(False)
+        review_dlg = PlanReviewDialog(
+            i18n.t("STEP — Review the plan") if can_build
+            else i18n.t("STEP — The plan"),
+            (i18n.t("{file} — confirm here and Prism builds a new copy. "
+                    "The original file is never touched.")
+             .replace("{file}", report["file"]) if can_build else
+             i18n.t("{file} — nothing Prism can apply by itself; the "
+                    "advice above is the deliverable")
+             .replace("{file}", report["file"])),
+            review, can_build, self)
+        built = bool(review_dlg.exec())
+        if not can_build:
+            self._notes.append(f"{report['file']}: plan reviewed → {review}")
+            if popup is None:
+                self._next()
+            return
+        if not built:
             self._notes.append(f"{report['file']}: not built — the review "
                                "page stays as the record of the plan")
-            self._next()
+            if popup is None:
+                self._next()
             return
-        self._set_busy(True, i18n.t(
-            "Building {name} and re-measuring it — here, on a copy…")
-            .replace("{name}", out["modified"]))
+        if popup is not None:
+            popup.set_busy(True)
+        else:
+            self._set_busy(True, i18n.t(
+                "Building a copy and re-measuring it…"))
         self._apply_worker = StepApplyWorker(
             m["path"], plan, report, self._mode(), out_dir, question,
             self._k_factor())
-        self._apply_worker.done.connect(self._on_applied)
-        self._apply_worker.failed.connect(self._on_failed)
+        self._apply_worker.done.connect(
+            lambda result, m=m, popup=popup: self._on_applied(result, m, popup))
+        self._apply_worker.failed.connect(
+            lambda err, popup=popup: self._on_build_failed(err, popup))
         self._apply_worker.start()
 
-    def _on_applied(self, result: dict):
-        m = self._current
+    def _on_applied(self, result: dict, m: dict = None, popup=None):
+        m = m or self._current
         report = m["report"]
         m["modified"] = result["out"]
         self.result.appendPlainText(
@@ -829,8 +1231,11 @@ class StepDialog(PrismDialog):
                                     kind="step", task=report["file"])
         except Exception:                               # noqa: BLE001
             pass
+        if popup is not None:
+            popup.set_busy(False)
         QDesktopServices.openUrl(QUrl.fromLocalFile(result["review"]))
-        self._next()
+        if popup is None:
+            self._next()
 
     # ── finishing ───────────────────────────────────────────────────────
 
@@ -843,16 +1248,18 @@ class StepDialog(PrismDialog):
         self.open_btn.setEnabled(bool(self._links))
         names = ", ".join(m["report"]["file"] for m in self.models)
         question = self.ask.text().strip()
+        self._task_name = f"STEP — {label}: {question or names}"
         try:
             CB.config.save_run({
-                "query": f"STEP — {label}: {question or names}",
+                "query": self._task_name,
                 "responses": self._responses, "links": self._links,
                 "step": {
                     "action": action, "mode": self._mode(),
                     "question": question,
                     "models": [{"file": m["report"]["file"],
                                 "out_dir": m["out_dir"],
-                                "modified": m.get("modified", "")}
+                                "modified": m.get("modified", ""),
+                                "conversation": self._conversation_path(m)}
                                for m in self.models],
                 },
             })
@@ -886,7 +1293,8 @@ class StepDialog(PrismDialog):
         """Same reasoning as Gerber: a QThread destroyed mid-run aborts the
         whole process, so ask each worker to stop and wait for it."""
         for worker in (self._worker, self._agent_worker, self._ask_worker,
-                       self._apply_worker):
+                       self._apply_worker, self._followup_ask_worker,
+                       self._followup_agent_worker):
             if worker is None or not worker.isRunning():
                 continue
             if hasattr(worker, "stop"):

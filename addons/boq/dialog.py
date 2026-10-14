@@ -34,6 +34,15 @@ from addons.boq.pricing import PricingTable
 from widgets.output_panel import short_duration
 
 
+VERIFY_PROMPT = (
+    "Verify and remake: recheck every measured quantity against the attached "
+    "drawing. The drawing is the source of truth; the measured figures were "
+    "computed locally from it. For every quantity that does not match the "
+    "drawing, state the drawing value and the measured value. Then remake the "
+    "whole BOQ in the same format as the previous answer with the corrected "
+    "figures, and list what changed.")
+
+
 def _preselect(combo: QComboBox, value: str):
     """Select `value` in the combo if it is one of the options; otherwise
     leave the registry's own first-listed (recommended) default in place."""
@@ -56,6 +65,9 @@ class BoqDialog(PrismDialog):
         # follow-up, timing, the scroll). Set before super() — the header copy
         # below reads self._doc.
         self.mode = "bom" if mode == "bom" else "boq"
+        # This dialog offers its own follow-up after each answer, so callers
+        # must not offer a second one.
+        self.owns_followup = True
         self._doc = "Bill of Materials" if self.mode == "bom" else "Bill of Quantities"
         self._noun = "BOM" if self.mode == "bom" else "BOQ"
         # The run-title prefix comes from this add-on's OWN manifest, so this
@@ -277,6 +289,11 @@ class BoqDialog(PrismDialog):
                                     on_click=self._open_link)
         self.open_btn.setEnabled(False)
         self.footer.add_utility(self.open_btn)
+        self.recheck_btn = self.button(i18n.t("Recheck with the drawing"), "secondary",
+                                       icon_name="eye", small=True,
+                                       on_click=self._ask_recheck)
+        self.recheck_btn.setEnabled(False)
+        self.footer.add_utility(self.recheck_btn)
         self.footer.add_secondary(self.button(i18n.t("Close"), on_click=self.reject))
         self.run_btn = self.button(f"Make my {self._noun}", "primary", icon_name="check",
                                    on_click=self._run)
@@ -558,7 +575,14 @@ class BoqDialog(PrismDialog):
         # the drawing; until 2026-09-10 the CAD file rode along here "so the
         # tool could check", which put the customer's drawing on a third
         # party's server for a formatting job that never needed it.
-        files = list(self.templates) + list(self.notes)
+        reference = self._reference_csv()
+        if reference:
+            prompt += (
+                "\n\nREFERENCE ONLY: the attached CSV is the offline measured and "
+                "priced take-off. Use it to lay out and check your figures. It is "
+                "not the firm's record: do not recompute totals or change any "
+                "quantity. Lines with a blank rate are unpriced.")
+        files = list(self.templates) + list(self.notes) + reference
         task_label = getattr(self, "_task_name", "") or f"{self._doc} — {self.request}"
 
         self._worker = AutomationWorker(
@@ -574,6 +598,18 @@ class BoqDialog(PrismDialog):
         self._worker.done.connect(self._on_written)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
+
+    def _reference_csv(self) -> list:
+        """The priced grid as a CSV for the writer, or the measured quantities
+        CSV when nothing is priced yet. Numbers only: the drawing never goes."""
+        if self.mode == "boq" and self.price_table.boq() is not None:
+            path = os.path.join(CB.config.RUNS_DIR,
+                                f"boq_priced_reference_{int(time.time())}.csv")
+            self.price_table.export("csv", path)
+            return [CB.files.attach(path)]
+        if self.csv_path:
+            return [CB.files.attach(self.csv_path)]
+        return []
 
     def _on_written(self, responses: dict, links: dict):
         self._set_busy(False, "")
@@ -595,6 +631,7 @@ class BoqDialog(PrismDialog):
                 (f"Done in {timing}. " if timing else "Done. ")
                 + "Check the numbers against the saved file above.")
         self.open_btn.setEnabled(bool(self._links.get("format")))
+        self.recheck_btn.setEnabled(bool(self.cad_path) and bool(texts))
         task_label = getattr(self, "_task_name", "") or f"{self._noun} — {self.request}"
         CB.config.save_run({
             "query": task_label, "responses": responses,
@@ -602,6 +639,8 @@ class BoqDialog(PrismDialog):
             "artifacts": getattr(self, "_artifacts_dir", "") or CB.config.current_run_dir(),
             "boq": {"quantities_csv": self.csv_path, "source": self.cad_path},
         })
+        if texts:
+            self._offer_followup()
 
     def _on_failed(self, error: str):
         self._set_busy(False, "")
@@ -610,7 +649,90 @@ class BoqDialog(PrismDialog):
     def _set_busy(self, busy: bool, message: str):
         self.progress.setVisible(busy)
         self.run_btn.setEnabled(not busy)
+        self.recheck_btn.setEnabled(not busy and bool(self.cad_path and self.result.toPlainText().strip()))
         self.status.setText(message)
+
+    def _drawing_consent(self) -> bool:
+        """The drawing leaves this computer only after this explicit yes."""
+        agent = self.writer_combo.currentText().strip() or "the writing AI"
+        answer = QMessageBox.question(
+            self, i18n.t("Send the drawing to AI?"),
+            i18n.t("You are now permitting {name} to be sent to {agent} so it "
+                   "can recheck the measured quantities. The drawing file "
+                   "leaves this computer. Continue?").replace(
+                       "{name}", os.path.basename(self.cad_path)).replace(
+                       "{agent}", agent),
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return answer == QMessageBox.Yes
+
+    def _ask_recheck(self):
+        if not self._drawing_consent():
+            return
+        self._send_followup(VERIFY_PROMPT, [CB.files.attach(self.cad_path)], verify=True)
+
+    def _send_followup(self, note: str, extra_files: list, verify: bool):
+        agent = self.writer_combo.currentText().strip() or "the writing AI"
+        stage = "recheck" if verify else "followup"
+        self._followup_agent = agent
+        self._followup_stage = stage
+        self._set_busy(True, f"{agent} is working on your {self._noun}…")
+        prompt = (f"{note}\n\nMEASURED FIGURES:\n{self.summary}\n\n"
+                  f"PREVIOUS ANSWER:\n{self.result.toPlainText()}")
+        files = list(extra_files) + list(self.templates) + list(self.notes)
+        self._worker = AutomationWorker(
+            {}, self.cfg, files,
+            f"{stage} — {getattr(self, '_task_name', '') or self._doc}",
+            custom_stages=[(stage, agent, [prompt])],
+            chatgpt_analysis=False)
+        self._worker.done.connect(self._on_followed_up)
+        self._worker.failed.connect(self._on_failed)
+        self._worker.start()
+
+    def _on_followed_up(self, responses: dict, links: dict):
+        stage = self._followup_stage
+        self._set_busy(False, "")
+        self._links.update(links)
+        self._all_responses.update(responses)
+        self._stage_agents_map[stage] = self._followup_agent
+        self._lap(stage)
+        texts = [t for t in (responses.get(stage) or []) if t.strip()]
+        if texts:
+            self.result.setPlainText(texts[0])
+            self.status.setText(i18n.t("Done. Check the numbers against the drawing and the saved file."))
+        else:
+            self.status.setText(i18n.t("Nothing came back. The previous answer is still shown."))
+        self.open_btn.setEnabled(bool(self._links.get(stage) or self._links.get("format")))
+        self._offer_followup()
+
+    def _offer_followup(self):
+        """The same 'anything to change?' window Prism shows after any run,
+        opened here on this screen so it comes straight after the output."""
+        from dialogs.followup_dialog import FollowupDialog
+        answer = self.result.toPlainText().strip()
+        if not answer:
+            return
+        actions = []
+        if self.cad_path:
+            actions.append(("verify", i18n.t("Verify and remake"), VERIFY_PROMPT))
+        dlg = FollowupDialog(answer, self,
+                             artifacts=[p for p in [self.csv_path] if p],
+                             quick_actions=actions)
+        dlg.exec()
+        if not dlg.submitted():
+            return
+        if dlg.chosen_quick() == "verify":
+            if not self._drawing_consent():
+                return
+            self._send_followup(dlg.followup_text(),
+                                [CB.files.attach(self.cad_path)], verify=True)
+            return
+        extra = []
+        for path in dlg.file_paths():
+            try:
+                extra.append(CB.files.attach(path))
+            except Exception:                           # noqa: BLE001
+                pass
+        self._send_followup(dlg.followup_text(), extra, verify=False)
 
     def closeEvent(self, event):
         """Wind up any worker before this dialog is destroyed.

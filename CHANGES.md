@@ -10,110 +10,92 @@ Tests: **1966 passing** (6 skipped, 8 Sep 2026 after Round 16 landed on main —
 
 ---
 
-# Unreleased — Email Inquiry: numbers, multi-delete, files (13 Oct 2026)
+# 1.6.2 — release roll-up (14 Oct 2026)
 
-Not committed. Built on top of the owner's uncommitted quoting and
-"customer wrote again" work; the 3 Oct All-mail items live on another
-machine and are not touched here. Tracker: `../Email_Inquiry_Changes_Tracker.md`.
+What this version carries on top of 1.6.1: the full Email Inquiry pipeline
+board (numbers, multi-delete, files, quotation PDF, Excel export), a
+redesigned STEP addon with a split Ask/Edit flow and per-model fallback, Lumi
+as a dockable edge button, Enter-to-go on Make a plan and Start the work, and
+the leads bulk bar cleanup. See `docs/handover/HANDOVER-2026-10-14.md` for the
+full handover and open items.
 
-- **Every inquiry gets its own number.** A second, fresh-subject enquiry from
-  a customer with an open inquiry was folded into the first one: same number,
-  same folder, and its product written over the first row's ("every inquiry
-  gets the same number"). `register.find_by_thread` now joins a mail onto an
-  earlier inquiry only when it is clearly a reply: its thread headers, a mail
-  that names the inquiry or quotation number, or a Re:/Fwd: whose subject is
-  that open inquiry's "Product asked" or the subject of a mail we sent on it.
-  A forwarded "Fwd: Enquiry for SS lockers" from the same buyer is a new
-  inquiry, and so is a mail with no reply markers at all ("SS Locker 8 Comp",
-  "Urgent", an empty subject) even with a quotation open — the earlier
-  "phone-style answer" rule is dropped, the owner's decision. The owner's
-  "customer wrote again" refresh of a New row runs only on a thread or
-  named-number match, never on a subject match (`register.match`).
-- **A number is never handed out twice.** Inquiry and quotation numbers were
-  counted only from the rows in the CSV, so a dropped row gave its number (and
-  its folder, with the first job's drawings in it) to the next mail. The next
-  number now also sits above every `inquiries/INQ-*` folder, every saved
-  `QTN-*` file and every quotation subject in the sent log
-  (`mailflow.numbers_in_use`). The inquiry screen saves through
-  `register.save_merged`, so its in-memory copy can no longer erase a row a
-  check, a second Prism or Excel added since it was read.
-- **Imported sheets:** "Inquiry No.", "Enq No", "Email ID", "Mobile" and the
-  like are read as Prism's own columns, so imported rows keep their numbers.
-  A row with no number no longer shares the `inquiries` folder itself; a reply
-  on one gives it a number.
-- **[9] matching:** "this product, 10 nos" can no longer be a "Confident
-  match": a match made of numbers alone never counts, and a lone candidate needs
-  two shared words (`quotation.confident_match`). A lone digit counts only as a
-  word of its own ("8 Comp"), not the 2 of "2mm" — keeping that one made an
-  exact spring spec stop reading as confident.
-- **[7] Delete several at once** on To quote, No answer yet and All inquiries
-  (ctrl/shift-click, cmd on a Mac): one question listing the rows, one "block
-  these senders?", one write. The button says how many. On They answered and
-  Order came, "Delete from this list" only takes the mails off that list; the
-  inquiries stay in the register. Picked rows show on the coloured rows too: a
-  firmer wash and a bar down the left edge.
-- **[3] Files:** the customer is sent the quotation as an A4 PDF on the
-  company's name (₹ in lakh grouping, aligned table; drawn by Qt, nothing new to
-  install), with the CSV still kept for Prism's own records. The automatic
-  covering mail lists the lines instead of a fixed-width table. All inquiries has
-  "Save as Excel…": real dates, phone numbers with their leading 0, money as
-  numbers, status colours. Saved attachments start with their inquiry number
-  (`INQ-26-27-0005_drawing.pdf`), and each mail is kept in its folder as an
-  `.eml`.
-- **A mail check no longer undoes what was done on screen while it ran.** The
-  check read the register, spent its AI calls and OCR, then saved its own copy:
-  a row deleted meanwhile came back, and a status or quotation number recorded
-  meanwhile reverted. It now re-reads the file and applies only what it did —
-  new rows, and the fields it changed on existing ones (`register.save_changes`).
-  Every register write (the check, the screen, the CLI) takes
-  `inquiries.csv.lock` for its read-modify-write, waits up to 5 s for another
-  writer, takes over a lock left by a crash after 30 s, and retries the final
-  replace briefly on Windows, where a virus scanner or indexer holds a new file
-  for a moment. A row the check has just numbered is no longer saved twice by
-  the screen.
-- **Deleting is by the row, not by the object on screen.** A delete confirmed
-  after a background check refreshed the list did nothing but said "deleted".
-  Rows are now found by inquiry number (or Email + Date + Product), the
-  automatic check waits while the question is open, and the status line counts
-  only what actually left the register. After ctrl-clicking the current row off,
-  Delete removes the picked rows its label counts, not the one deselected.
-- **Quotation PDF:** drawn into a temporary file and moved over the old one only
-  when complete. A PDF open in Acrobat (Windows locks it) used to leave the old
-  file in place and report it as written, so the customer got old prices; now
-  the CSV goes instead and the owner is told why before pressing Send.
-- **Save as Excel…:** text from mail that starts with = + - @ is stored as text,
-  not a live formula, and control characters (from OCR, odd subjects) are
-  dropped instead of failing the whole export. A blank or hand-typed status
-  ("quoted", "Won", "lost") is coloured the same on screen and in Excel.
-- A customer's own `PO-26-27-0012.pdf` saved before attachments carried the
-  inquiry number is no longer hidden as one of Prism's files; only `QTN-*` and
-  Prism's saved `.eml` are. A check lets go of each mail's raw bytes once its
-  `.eml` is written (and at once for mail that is not an inquiry).
-- **[12][15][17] One colour per state**, the owner's choice: yet to quote blue,
-  quoted grey, no reply (Following up) amber, negotiating orange, won green
-  (Accepted, Converted, and a PO accepted by hand), lost red. New, Accepted and
-  Converted used to share one green, and Quoted and Following up were two greys
-  nobody could tell apart. The hexes live in `theme.REGISTER_TONES`, a light and
-  a dark set, measured by `tests/test_register_colours.py` (every two states at
-  least 15 apart in CIEDE2000, text 7:1 in light and 4.5:1 in dark, a picked row
-  visible on all twelve). A quoted inquiry now stays on To quote, greyed, below
-  the ones still to quote, and is also in No answer yet; only the blue ones count
-  in "To quote (n)". "Save as Excel…" fills each whole row with its state's
-  colour and adds a "Colour key" sheet.
-- **What the real window showed (13 Oct, 1078x900).** The state colours are
-  now soft washes with each state's own dark ink, the look the register had
-  before: the strong blue made every New row look picked. A picked row is a
-  charcoal band with the row's colour as its text and a bar down its left
-  edge, so it can never be mistaken for a tint (light pairs at least 10 apart
-  in CIEDE2000, dark 15; New at least 15 from any picked row and from the
-  palette's highlight). On They answered, the reply and "Prism thinks" sit side
-  by side and the table gives way to two rows, so the picker, "Update the
-  register" and the row's buttons are no longer drawn over each other or over
-  the text box. All inquiries puts "Bring in an old list (CSV)…" and "Save as
-  Excel…" on a second toolbar line, so the search box keeps about eighteen
-  characters and All/Open/Won/Lost sit on one line. To quote no longer opens on
-  a row: They answered's automatic pick of its first row is no longer carried
-  into the other tabs on a reload; a row the owner picked still is.
+- **Email Inquiry — every inquiry gets its own number.** A second,
+  fresh-subject enquiry from a customer with an open inquiry was folded into
+  the first one: same number, same folder, product overwritten. `register.find_by_thread`
+  now joins a mail onto an earlier inquiry only when it is clearly a reply
+  (thread headers, a mail that names the inquiry or quotation number, or a
+  Re:/Fwd: whose subject is that open inquiry's "Product asked" or the subject
+  of a mail we sent on it). A forwarded "Fwd: Enquiry for SS lockers" from the
+  same buyer is a new inquiry, and so is a mail with no reply markers at all
+  even with a quotation open. The "customer wrote again" refresh of a New row
+  runs only on a thread or named-number match (`register.match`).
+- **A number is never handed out twice.** The next number now also sits above
+  every `inquiries/INQ-*` folder, every saved `QTN-*` file and every quotation
+  subject in the sent log (`mailflow.numbers_in_use`). The inquiry screen saves
+  through `register.save_merged`, so its in-memory copy can no longer erase a
+  row added by a check, a second Prism or Excel since it was read.
+- **Imported sheets:** "Inquiry No.", "Enq No", "Email ID", "Mobile" and similar
+  are read as Prism's own columns so imported rows keep their numbers.
+- **Matching tightened:** a "Confident match" made of numbers alone never
+  counts; a lone candidate needs two shared words (`quotation.confident_match`).
+- **Delete several at once** on To quote, No answer yet and All inquiries
+  (ctrl/shift-click): one question listing the rows, one "block these senders?",
+  one write. On They answered / Order came, Delete only takes the mails off that
+  list; the inquiries stay in the register.
+- **Files:** the customer is sent the quotation as an A4 PDF on the company's
+  name (₹ in lakh grouping, aligned table; drawn by Qt). All inquiries has
+  "Save as Excel…" with real dates, phone numbers, money as numbers, status
+  colours. Saved attachments carry their inquiry number (`INQ-26-27-0005_drawing.pdf`);
+  each mail is kept in its folder as an `.eml`.
+- **A mail check no longer undoes changes made on screen while it ran.** The
+  check now re-reads the file and applies only what it did — new rows, and the
+  fields it changed. Every register write takes `inquiries.csv.lock` with a
+  5 s wait, 30 s crash takeover, and Windows retry.
+- **Deleting is by the row, not the object on screen.** Rows are found by
+  inquiry number (or Email + Date + Product), the timer waits while the question
+  is open, and the status line counts only what actually left the register.
+- **One colour per state:** yet to quote blue, quoted grey, following up amber,
+  negotiating orange, won green, lost red. The hexes live in `theme.REGISTER_TONES`.
+- **Inquiry pipeline board:** new `addons/inquiry/board.py`, `drawer.py`,
+  `pipeline_actions.py`, `pipeline_setup.py`, `documents.py` carrying the full
+  kanban-style pipeline view; `InquiryDialog` is now a plain embedded screen
+  (not a modal), navigated to like Home or Settings.
+- **A customer's attachment becomes a Prism attachment in one click** from inside
+  the inquiry screen or the quotation window (`inquiry_work_panel.attach_to_prism`).
+- **STEP addon — Ask and Edit are now separate actions** instead of a single
+  multi-step flow.
+  - **Ask** now delivers an immediate answer in a new `AnswerDialog` popup — no
+    plan page is opened, nothing is built. The footer button says "Get the
+    Answer" so the action is never ambiguous.
+  - **Edit** inherited the review page: measure, get Groq's suggestions, review
+    the exact change plan on a new `PlanReviewDialog`, confirm, then apply to a
+    copy and re-measure. The footer button says "Make the Changes".
+  - **Model picker** (Groq / ChatGPT / Claude) with a fixed fallback order
+    (`FALLBACK_ORDER`) — the stash's Groq-only path is gone; Gemini is
+    deliberately excluded (its `_maker_brief` wrapper refuses a plain text Q&A).
+  - **`ACTION_BUTTON` dict** gives the footer button a label and icon per action
+    so the single button always names the actual result.
+  - **`AskPanel.file_removed` signal** emitted when a chip is removed, so Gerber
+    and STEP keep their own path lists in sync. Without this, the chip vanished
+    but the owner's list kept the file; Generate still ran it.
+  - **History step conversation rendering** (`dialogs/history_dialog.py`):
+    STEP's own response keys (`ask · <model>`, `plan · <model>`, etc.) are no
+    longer listed as pipeline stages; they are rendered as a labelled
+    back-and-forth (`_step_conversation`) when the conversation file exists, or
+    fall back to the raw text for entries predating this change.
+- **BOQ / BOM follow-up guard** (`main_window.py`): `owns_followup` flag prevents
+  the main window offering the generic routed-pipeline follow-up after a BOQ or
+  BOM run that already owns its own follow-up dialog — the dead-end where
+  ChatGPT wrote code-looking text but no file appeared is closed. STEP
+  deliberately does not offer the generic follow-up at all for the same reason.
+- **Lumi as a dockable edge button.** Lumi now pins to the window's right edge
+  so it is reachable on every page without covering action buttons or form
+  fields. Bulk-select mode in Leads hides the pill cleanly.
+- **Enter moves the task on.** "Make a plan" and "Start the work" no longer need
+  the mouse; pressing Enter on the input moves to the next step.
+- **Leads polish.** The bulk bar clears the Ask-Lumi pill; header and chip fit
+  fixes.
+- **Engine (prism_terminal):** updated submodule pin.
 
 ---
 

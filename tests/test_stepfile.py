@@ -678,6 +678,32 @@ class ChangesLandOnACopy(unittest.TestCase):
         self.assertEqual(part["size_mm"], (60.0, 40.0, 8.0))
         self.assertEqual(part["holes"], [{"dia_mm": 6.0, "count": 1}])
 
+    def test_a_planner_added_suffix_on_the_part_name_still_matches(self):
+        """Round: a reviewing agent wrote "part": "<real name> — 1 NOS"
+        (a quantity annotation it invented, never asked for) instead of
+        the measured name verbatim. Exact matching found no part at all —
+        predicted_parts() silently showed no change, and apply_plan(),
+        with nothing else in the plan, raised "Nothing in the plan could
+        be applied" — a real, reviewed, correct-looking plan that could
+        never actually reach the file. The real name is accepted as a
+        case-insensitive PREFIX of whatever the plan wrote instead."""
+        block_name = SF.load_parts(self.path)[0][0]
+        out = os.path.join(self.dir, "bigger2.step")
+        plan = {"changes": [
+            {"op": "enlarge_hole", "part": f"{block_name} — 1 NOS",
+             "dia_mm": 5.0, "new_dia_mm": 6.0, "why": ""}], "advice": []}
+        done = SF.apply_plan(self.path, plan, out)
+        self.assertTrue(any("1 hole(s) enlarged" in l for l in done["log"]),
+                        done["log"])
+        part = SF.analyse(out, mode="plastic")["parts"][0]
+        self.assertEqual(part["holes"], [{"dia_mm": 6.0, "count": 1}])
+
+        report = SF.analyse(self.path, mode="plastic")
+        pred = SF.predicted_parts(report, plan)
+        self.assertEqual(pred[0]["holes"], [{"dia_mm": 6.0, "count": 1}],
+                         "the review page's predicted column must show "
+                         "the same change the real build applies")
+
     def test_a_scaled_part_keeps_its_holes_as_holes(self):
         out = os.path.join(self.dir, "scaled.step")
         SF.apply_plan(self.path, {"changes": [
@@ -860,7 +886,13 @@ class TheTerminalDoor(unittest.TestCase):
         self.assertNotIn("F.attach(target", body)
         self.assertIn('F.attach(drawn["png"])', body)
         self.assertIn("groq_chat", body)
-        self.assertIn('out["modified"]', body)
+        # The file actually written is named by modified_name() (stamped
+        # with when it was built), not the flat names()['modified'] base —
+        # see core.stepfile.modified_name's own docstring for why. The
+        # un-stamped base is still the right thing for the pre-build
+        # "about to write X" prompt, which this still checks for.
+        self.assertIn("SF.modified_name(report)", body)
+        self.assertIn("build {out['modified']} now?", body)
 
 
 class EveryFileCarriesTheModelsName(unittest.TestCase):
@@ -890,6 +922,33 @@ class EveryFileCarriesTheModelsName(unittest.TestCase):
                          "Assem1 - top - flat pattern.png")
         self.assertEqual(SF.ai_sheet_name("Assem1", 1, ".png"),
                          "Assem1 - AI drawing sheet 1.png")
+
+    def test_the_built_files_real_name_is_stamped_not_flat(self):
+        """Round: every Edit of the same model writes its own numbered
+        sibling folder (output_dir()), but inside it the file was always
+        literally "<stem> - modified.step" — identical on every build, so
+        two different requests' results were indistinguishable by name,
+        both inside and especially once moved out of their folder. The
+        stamp is what names()['modified'] (still flat, still used for the
+        pre-build "about to write X" message) deliberately does not
+        carry — it is called more than once per build and would disagree
+        with itself if it read the clock."""
+        a = SF.modified_name("Assem1")
+        self.assertTrue(a.startswith("Assem1 - modified "))
+        self.assertTrue(a.endswith(".step"))
+        self.assertNotEqual(a, SF.names("Assem1")["modified"])
+
+    def test_two_builds_a_second_apart_get_different_names(self):
+        import datetime
+        from unittest import mock
+        with mock.patch.object(SF, "_dt") as dt_mod:
+            dt_mod.datetime.now.return_value = datetime.datetime(
+                2026, 10, 14, 6, 35, 1)
+            first = SF.modified_name("Assem1")
+            dt_mod.datetime.now.return_value = datetime.datetime(
+                2026, 10, 14, 6, 35, 2)
+            second = SF.modified_name("Assem1")
+        self.assertNotEqual(first, second)
 
     def test_names_read_the_stem_off_a_report(self):
         report = {"file": "Assem1.STEP", "stem": "Assem1"}

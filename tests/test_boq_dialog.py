@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -180,6 +181,188 @@ class TheDrawingNeverReachesAnAI(unittest.TestCase):
             encoding="utf-8").read()
         self.assertIn("write_files = templates + note_files", text)
         self.assertNotIn("write_files = ([cad_file] if cad_file else [])", text)
+
+
+class TheDrawingGoesToAIOnlyAfterAYes(unittest.TestCase):
+    """"Recheck with the drawing" is the one place the drawing may leave the
+    machine, and only after the user says yes in the popup."""
+
+    class _Capture:
+        seen = {}
+        started = 0
+
+        def __init__(self, *a, **kw):
+            TheDrawingGoesToAIOnlyAfterAYes._Capture.seen = {"args": a, "kwargs": kw}
+            self.done = self.failed = self
+
+        def connect(self, *_):
+            pass
+
+        def start(self):
+            TheDrawingGoesToAIOnlyAfterAYes._Capture.started += 1
+
+    def setUp(self):
+        self._Capture.started = 0
+        self.d = _dialog()
+        self._drawing = os.path.join(tempfile.mkdtemp(), "sai.dxf")
+        with open(self._drawing, "w") as fh:
+            fh.write("0\nEOF\n")
+        self.d.cad_path = self._drawing
+        self.d.summary = "WALLS 12.00 m"
+        self.d._task_name = "BOQ — sai"
+        self.d.result.setPlainText("1  Brick wall  12.00  m")
+
+    def _ask(self, answer):
+        from unittest import mock
+        from addons.boq import dialog as BD
+        with mock.patch.object(BD, "AutomationWorker", self._Capture), \
+                mock.patch.object(BD.QMessageBox, "question",
+                                  staticmethod(lambda *a, **k: answer)):
+            self.d._ask_recheck()
+
+    def test_the_button_is_off_until_there_is_an_answer_and_a_drawing(self):
+        self.d._set_busy(False, "")
+        self.assertTrue(self.d.recheck_btn.isEnabled())
+        self.d.cad_path = ""
+        self.d._set_busy(False, "")
+        self.assertFalse(self.d.recheck_btn.isEnabled())
+
+    def test_saying_no_sends_nothing(self):
+        from addons.boq import dialog as BD
+        self._ask(BD.QMessageBox.No)
+        self.assertEqual(self._Capture.started, 0)
+
+    def test_saying_yes_sends_the_drawing_to_the_writer_with_the_measured_figures(self):
+        from addons.boq import dialog as BD
+        self._ask(BD.QMessageBox.Yes)
+        self.assertEqual(self._Capture.started, 1)
+        files = self._Capture.seen["args"][2]
+        self.assertIn(self._drawing, [f["path"] for f in files])
+        stage = self._Capture.seen["kwargs"]["custom_stages"][0]
+        self.assertEqual(stage[0], "recheck")
+        prompt = stage[2][0]
+        self.assertIn("WALLS 12.00 m", prompt)
+        self.assertIn("Brick wall", prompt)
+
+    def test_the_corrected_answer_replaces_the_first_one_in_the_same_box(self):
+        from unittest import mock
+        self.d._followup_agent = "Kimi 2.6"
+        self.d._followup_stage = "recheck"
+        with mock.patch("dialogs.followup_dialog.FollowupDialog") as fake:
+            fake.return_value.submitted.return_value = False
+            self.d._on_followed_up({"recheck": ["1  Brick wall  11.50  m"]}, {})
+        self.assertEqual(self.d.result.toPlainText(), "1  Brick wall  11.50  m")
+        self.assertIn("recheck", self.d._all_responses)
+
+
+    def _offer(self, *, submitted, quick="", note="", files=()):
+        from unittest import mock
+        with mock.patch("dialogs.followup_dialog.FollowupDialog") as fake:
+            dlg = fake.return_value
+            dlg.submitted.return_value = submitted
+            dlg.chosen_quick.return_value = quick
+            dlg.followup_text.return_value = note
+            dlg.file_paths.return_value = list(files)
+            with mock.patch.object(self.d, "_drawing_consent", return_value=True) as consent:
+                self.d._offer_followup()
+        return fake, consent
+
+    def test_the_followup_popup_is_offered_with_a_one_click_verify_and_remake(self):
+        fake, _ = self._offer(submitted=False)
+        actions = fake.call_args.kwargs["quick_actions"]
+        self.assertEqual([a[0] for a in actions], ["verify"])
+        self.assertEqual(fake.call_args.kwargs["artifacts"], [])
+
+    def test_no_popup_without_a_drawing_so_verify_is_not_offered(self):
+        from unittest import mock
+        self.d.cad_path = ""
+        with mock.patch("dialogs.followup_dialog.FollowupDialog") as fake:
+            fake.return_value.submitted.return_value = False
+            self.d._offer_followup()
+        self.assertEqual(fake.call_args.kwargs["quick_actions"], [])
+
+    def test_saying_no_to_the_followup_sends_nothing(self):
+        from unittest import mock
+        with mock.patch.object(self._Capture, "__init__", self._Capture.__init__), \
+                mock.patch("addons.boq.dialog.AutomationWorker", self._Capture):
+            self._offer(submitted=False)
+        self.assertEqual(self._Capture.started, 0)
+
+    def test_verify_and_remake_asks_consent_and_sends_the_drawing(self):
+        from unittest import mock
+        from addons.boq import dialog as BD
+        with mock.patch.object(BD, "AutomationWorker", self._Capture):
+            self._offer(submitted=True, quick="verify", note="VERIFY")
+        self.assertEqual(self._Capture.started, 1)
+        files = self._Capture.seen["args"][2]
+        self.assertIn(self._drawing, [f["path"] for f in files])
+        self.assertEqual(self._Capture.seen["kwargs"]["custom_stages"][0][0], "recheck")
+
+    def test_a_typed_followup_sends_only_the_files_the_user_added(self):
+        from unittest import mock
+        from addons.boq import dialog as BD
+        extra = os.path.join(tempfile.mkdtemp(), "site_note.txt")
+        with open(extra, "w") as fh:
+            fh.write("gate is on the north side")
+        with mock.patch.object(BD, "AutomationWorker", self._Capture):
+            self._offer(submitted=True, quick="", note="add a gate", files=[extra])
+        self.assertEqual(self._Capture.started, 1)
+        files = self._Capture.seen["args"][2]
+        self.assertIn(extra, [f["path"] for f in files])
+        self.assertNotIn(self._drawing, [f["path"] for f in files])
+        self.assertEqual(self._Capture.seen["kwargs"]["custom_stages"][0][0], "followup")
+
+
+class TheWriterGetsThePricedCsvAsReferenceOnly(unittest.TestCase):
+    """The offline priced grid goes to the write-up AI as a CSV reference —
+    never the drawing, and never as the record of the numbers."""
+
+    class _Capture:
+        seen = {}
+
+        def __init__(self, *a, **kw):
+            TheWriterGetsThePricedCsvAsReferenceOnly._Capture.seen = {
+                "args": a, "kwargs": kw}
+            self.done = self.failed = self
+
+        def connect(self, *_):
+            pass
+
+        def start(self):
+            pass
+
+    def _dialog_with_grid(self):
+        d = _dialog()
+        d.q = {"layers": ["WALLS"], "lengths_by_layer": {"WALLS": 12.0},
+               "areas_by_layer": {}, "block_counts": {}, "unit": "m",
+               "scope_total_layers": 1}
+        d.cad_path = "/secret/site.dxf"
+        d.summary = "WALLS 12.00 m"
+        d.request = "BOQ for the site"
+        d.writer_agent = "Claude"
+        d.price_table.set_quantities(d.q, title="BOQ")
+        return d
+
+    def test_the_priced_grid_goes_as_a_reference_csv_and_the_drawing_does_not(self):
+        import csv
+        from unittest import mock
+        from addons.boq import dialog as BD
+        d = self._dialog_with_grid()
+        with mock.patch.object(BD, "AutomationWorker", self._Capture):
+            d._write()
+        files = self._Capture.seen["args"][2]
+        self.assertEqual(len(files), 1)
+        self.assertTrue(files[0]["name"].startswith("boq_priced_reference"))
+        self.assertTrue(files[0]["name"].endswith(".csv"))
+        self.assertIn("size", files[0])
+        self.assertTrue(os.path.exists(files[0]["path"]))
+        with open(files[0]["path"], newline="", encoding="utf-8-sig") as fh:
+            self.assertGreater(len(list(csv.reader(fh))), 1)
+        for f in files:
+            self.assertFalse(f["path"].lower().endswith((".dxf", ".dwg")))
+        prompt = self._Capture.seen["kwargs"]["custom_stages"][0][2][0]
+        self.assertIn("REFERENCE ONLY", prompt)
+        self.assertNotIn("/secret/site.dxf", prompt)
 
 
 class ASampleBoqDefinesTheDeliverable(unittest.TestCase):

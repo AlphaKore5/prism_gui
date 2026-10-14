@@ -543,6 +543,11 @@ class MainWindow(QMainWindow):
         self.inquiry_panel.check_requested.connect(
             lambda: self._open_inquiry_dialog(auto_check=True))
         self.inquiry_panel.set_up.connect(self._open_inquiry_setup)
+        # Same attach path the sidebar's own favourites use (see
+        # sidebar.favorite_chosen above) — a customer's attachment becomes
+        # a real Prism attachment in one click, from inside the inquiry
+        # screen or the quotation window it opens.
+        self.inquiry_work_panel.attach_to_prism.connect(self._attach_path)
         self.wizard_panel.finished.connect(self._on_wizard_finished)
         self.wizard_panel.guide_requested.connect(self._open_guide)
         self.settings_panel.login_tabs.connect(self._open_login_tabs)
@@ -1588,6 +1593,8 @@ class MainWindow(QMainWindow):
             return
         dlg = BoqDialog(self.cfg, [], self)
         dlg.exec()
+        if getattr(dlg, "owns_followup", False):
+            return
         # A BOQ runs in its own dialog and never touches the main workbench's
         # completion path, so the post-completion follow-up was never offered
         # after one. Bridge it in now the dialog has closed: hand its finished
@@ -1622,6 +1629,8 @@ class MainWindow(QMainWindow):
         # and writes a parts list instead of a quantities schedule.
         dlg = BoqDialog(self.cfg, [], self, mode="bom")
         dlg.exec()
+        if getattr(dlg, "owns_followup", False):
+            return
         task_name = getattr(dlg, "_task_name", "") or f"{dlg._doc} — {getattr(dlg, 'request', '')}"
         self._offer_followup_for_dialog(
             task_name,
@@ -1663,9 +1672,25 @@ class MainWindow(QMainWindow):
                 "models:\n\n    pip install cadquery\n\n"
                 f"Detail: {err}")
             return
-        StepDialog(self.cfg, [], self).exec()
+        dlg = StepDialog(self.cfg, [], self)
+        dlg.exec()
         # A run finished in the dialog must show on the screen behind it.
         self.step_panel.refresh()
+        # Deliberately NOT offering the ordinary routed-pipeline follow-up
+        # here (BOQ/BOM still do, right above). It used to: STEP ran its
+        # own worker chain and never reached _on_run_done, so that offer
+        # was invisible from inside it, same gap BOQ/BOM bridge. But for
+        # STEP specifically that bridge became a dead end once its own
+        # Answer popup grew a real follow-up + "Build this": the generic
+        # one here can only ever save a refined TEXT answer into history —
+        # it never calls apply_plan, so no matter what the tool writes
+        # back, nothing is ever actually built. A customer followed up
+        # here, ChatGPT wrote something that read like real code, and no
+        # file appeared — twice, once from here and once from History's
+        # own "Follow up" button, which runs the identical dead-end code.
+        # STEP's own popup is now the one place a follow-up can actually
+        # become a file; this one is left unoffered so there is only ever
+        # one door, and it works.
 
     def _open_leads(self):
         # Front door first, like BOQ/Email: the rail switches screens, and the

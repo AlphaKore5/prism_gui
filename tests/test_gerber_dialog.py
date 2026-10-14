@@ -535,5 +535,24 @@ class GenerationWaitsForTheButton(unittest.TestCase):
         self.assertEqual(dlg.run_btn.text(), "Answer with AI")
 
 
+class RemovingAChipActuallyRemovesTheJob(unittest.TestCase):
+    """The chip's own 'x' used to only clear AskPanel's private copy —
+    dlg.paths (what Generate really measures) kept the file, so a
+    mis-picked job was measured anyway even after it looked removed.
+    Same bug, same fix, as STEP's AskPanel use."""
+
+    def test_removing_a_chip_removes_it_from_paths(self):
+        dlg = _dialog()
+        dlg._on_files_added(["/nowhere/a.zip"])
+        dlg._on_files_added(["/nowhere/b.zip"])
+        self.assertEqual(len(dlg.paths), 2)
+        dlg.ask.remove_path(os.path.abspath("/nowhere/a.zip"))
+        self.assertEqual([os.path.basename(p) for p in dlg.paths], ["b.zip"])
+        self.assertTrue(dlg.generate_btn.isEnabled())
+        dlg.ask.remove_path(os.path.abspath("/nowhere/b.zip"))
+        self.assertEqual(dlg.paths, [])
+        self.assertFalse(dlg.generate_btn.isEnabled())
+
+
 if __name__ == "__main__":
     unittest.main()

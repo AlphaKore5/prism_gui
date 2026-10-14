@@ -293,6 +293,10 @@
 
       window.__timelines = window.__timelines || {};
       gsap.set("[data-hf-id=\"hf-w0i1\"]", { x: 94, y: -2 });
+      gsap.set("[data-hf-id=\"hf-13g9\"]", { x: 104, y: -1 });
+      gsap.set("[data-hf-id=\"hf-1avq\"]", { x: -86, y: -1 });
+      gsap.set("[data-hf-id=\"hf-3rah\"]", { x: -8, y: 0 });
+      gsap.set("[data-hf-id=\"hf-e2hd\"]", { x: -22, y: -59 });
       var tl = gsap.timeline({ paused: true });
 
       /* ────────────────────────────────────────────────────────────────
@@ -408,19 +412,34 @@
         TYPE_START
       );
 
-      // cue 1 — waterfall entry: per-word x-cascade with SHRINKING gaps
-      var gap1 = 0.055;
-      var at1 = BEATS[0];
-      wordsOf("sixtabs-cue-1").forEach(function (word) {
-        tl.fromTo(
-          word,
-          { x: 180, opacity: 0.3 },
-          { x: 0, opacity: 1, duration: 0.45, ease: "power4.out" },
-          at1
-        );
-        at1 += gap1;
-        gap1 *= 0.84;
-      });
+      /* All three cue lines share ONE reveal grammar: a per-word waterfall
+         that rises on the Y axis only, from opacity 0.
+         - opacity MUST start at 0. fromTo renders its from-state immediately,
+           so any non-zero start opacity puts the line on screen at t=0 —
+           parked at its x offset, which reads as a misalignment.
+         - The travel is vertical only. Per-word X travel let neighbouring
+           words slide across each other mid-flight ("everythingyou"), and a
+           negative X start pushed the line past the frame's left edge.
+         Every word therefore holds the line's true left edge at all times. */
+      var CUE_RISE = 40; // px of vertical travel
+      var CUE_DUR = 0.45;
+      var CUE_EASE = "power3.out"; // long-tail settle, house default
+
+      function revealCue(id, at, gap) {
+        wordsOf(id).forEach(function (word) {
+          tl.fromTo(
+            word,
+            { y: CUE_RISE, opacity: 0 },
+            { y: 0, opacity: 1, duration: CUE_DUR, ease: CUE_EASE },
+            at
+          );
+          at += gap;
+          gap *= 0.84; // shrinking gaps — the waterfall accelerates
+        });
+      }
+
+      // cue 1 — waterfall entry
+      revealCue("sixtabs-cue-1", BEATS[0], 0.055);
 
       /* ── Scene 2 (1.4–3.0s) ─────────────────────────────────────────
          Cue 2 lands beneath cue 1; two more slabs arrive on receding
@@ -428,14 +447,8 @@
          opacity — the repetition is the read. The depth falloff itself
          (scale / opacity / blur) is a fixed style, not a move. */
 
-      wordsOf("sixtabs-cue-2").forEach(function (word, i) {
-        tl.fromTo(
-          word,
-          { y: 54, opacity: 0 },
-          { y: 0, opacity: 1, duration: 0.42, ease: "expo.out" },
-          BEATS[1] + i * 0.05
-        );
-      });
+      // cue 2 — same waterfall grammar as cues 1 and 3
+      revealCue("sixtabs-cue-2", BEATS[1], 0.055);
 
       ["#sixtabs-slab-claude", "#sixtabs-slab-perplexity"].forEach(function (sel, i) {
         var el = document.querySelector(sel);
@@ -471,18 +484,8 @@
          closing the gutters until the centre slab is boxed in.
          Out-easing only, staggered by index. */
 
-      var gap3 = 0.05;
-      var at3 = BEATS[2];
-      wordsOf("sixtabs-cue-3").forEach(function (word) {
-        tl.fromTo(
-          word,
-          { x: -160, opacity: 0.25 },
-          { x: 0, opacity: 1, duration: 0.5, ease: "circ.out" },
-          at3
-        );
-        at3 += gap3;
-        gap3 *= 0.84;
-      });
+      // cue 3 — same waterfall grammar as cues 1 and 2
+      revealCue("sixtabs-cue-3", BEATS[2], 0.055);
 
       var INWARD_DUR = 0.85;
       var INWARD_STAGGER = 0.12;
@@ -582,6 +585,8 @@
 
       // full-span anchor so the sub-composition timeline covers the shot
       tl.to({}, { duration: SCENE_DURATION }, 0);
+
+      tl.set("[data-hf-id=\"hf-3rah\"]", { width: 223, height: 48, immediateRender: true }, 0);
 
       window.__timelines["01-six-tabs"] = tl;
     })();

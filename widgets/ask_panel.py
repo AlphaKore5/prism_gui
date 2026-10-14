@@ -44,6 +44,7 @@ class AskPanel(QWidget):
 
     speak_clicked = Signal()
     files_added = Signal(list)      # list of absolute paths
+    file_removed = Signal(str)      # the absolute path taken back out
 
     def __init__(self, placeholder: str, parent=None):
         super().__init__(parent)
@@ -173,10 +174,17 @@ class AskPanel(QWidget):
     def remove_path(self, path: str):
         """Take one file back out. There was no way to do this at all — the
         only correction available for a mis-picked file was to close the
-        dialog and start again."""
+        dialog and start again.
+
+        Emits `file_removed` so an owner keeping its own copy of the list
+        (Gerber, STEP — each needs the plain path, not a chip) stays in
+        sync. Without this the chip vanished but the owner's own list kept
+        the file, so Generate ran it anyway — a mis-picked file could never
+        actually be taken back out."""
         if path in self._paths:
             self._paths.remove(path)
             self._refresh_chips()
+            self.file_removed.emit(path)
 
     def _refresh_chips(self):
         while self._chip_layout.count():

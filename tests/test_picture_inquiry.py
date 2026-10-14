@@ -39,8 +39,9 @@ import core_bridge as CB  # noqa: E402
 from core import inbox, mailflow, ocr, register  # noqa: E402
 from addons.inquiry import autoquote  # noqa: E402
 from addons.inquiry import dialog as UI  # noqa: E402
+from addons.inquiry import quotation as Q  # noqa: E402
 from addons.inquiry.setup import InquirySetupDialog  # noqa: E402
-from test_inquiry_ui import _NoSave, ready_cfg  # noqa: E402
+from test_inquiry_ui import _NoSave, _Patched, ready_cfg  # noqa: E402
 
 _app = QApplication.instance() or QApplication([])
 quoting = CB.get_quoting()
@@ -197,6 +198,87 @@ class ThePictureReachesTheQuote(unittest.TestCase):
         self.assertIn("KJP3", q.picture_label.text())
         self.assertEqual(q.item_picker.currentData().code, "KJP 3")
         self.assertEqual(q.quantity.text(), "4")
+
+    def test_the_quotation_windows_attachments_button_reaches_main_window(self):
+        """A real ask: a customer's drawing was always a trip to the file
+        manager away, even from the window that is ABOUT what they sent.
+        The quotation window has no attach_to_prism signal of its own —
+        it relays through the inquiry screen that opened it (parent_dialog),
+        the one thing main_window.py is actually wired to."""
+        open(os.path.join(self.inquiry_folder, "crop.png"), "w").write("x")
+        row = self._row("4 nos please")
+        register.save([row], mailflow.Paths(self.folder).register_csv)
+        with _NoSave():
+            dialog = UI.InquiryDialog(self.cfg)
+            dialog._refresh_register()
+            q = UI.QuotationDialog(self.cfg, dialog._register_rows[0],
+                                   self.items, dialog)
+        emitted = []
+        dialog.attach_to_prism.connect(emitted.append)
+        created = []
+        real = Q._AttachmentsDialog
+
+        class _Capturing(real):
+            def exec(self):
+                created.append(self)
+
+        with _Patched(Q, "_AttachmentsDialog", _Capturing):
+            q._show_attachments()
+        self.assertEqual(len(created), 1)
+        path = os.path.join(self.inquiry_folder, "crop.png")
+        attach_btn = next(b for b in created[0].findChildren(UI.QPushButton)
+                          if "Attach to Prism" in b.text())
+        attach_btn.click()
+        self.assertEqual(emitted, [path])
+
+    def test_auto_selecting_a_matched_row_does_not_crash_the_window(self):
+        """Found from a real crash report: pre-selecting the single
+        matched item fired a recalculation before self.preview existed
+        yet, raising "QuotationDialog object has no attribute preview" on
+        every price change afterward. Only visible when the matched row
+        is NOT the first one in the list — QComboBox.setCurrentIndex(0)
+        when already at 0 is a silent no-op and never reproduces this, so
+        this rate list deliberately puts another code ahead of KJP 3."""
+        rates = os.path.join(self.folder, "rates2.csv")
+        with open(rates, "w", encoding="utf-8") as f:
+            f.write("Code,Description,Unit,Rate\n"
+                    "AAA-1,Something else entirely,nos,500\n"
+                    "KJP 3,SS Locker 8 compartment,nos,18500\n")
+        items = quoting.load_rates(rates)
+        row = self._row("4 nos please")
+        register.save([row], mailflow.Paths(self.folder).register_csv)
+        with _NoSave():
+            dialog = UI.InquiryDialog(self.cfg)
+            dialog._refresh_register()
+            q = UI.QuotationDialog(self.cfg, dialog._register_rows[0], items, dialog)
+        self.assertEqual(q.item_picker.currentIndex(), 1)   # proves it fired
+        self.assertIn("18,500.00", q.preview.toPlainText())
+
+    def test_a_badly_read_picture_does_not_pass_as_a_confident_match(self):
+        """Real case: a photo of "SS Locker 8 Comp" OCR'd so badly the
+        actual product word never surfaced, leaving only "SS" — which
+        matched an unrelated row sharing nothing else, and that lone,
+        thin overlap was being shown as a green "Confident match"."""
+        unrelated = os.path.join(self.folder, "rates2.csv")
+        with open(unrelated, "w", encoding="utf-8") as f:
+            f.write("Code,Description,Unit,Rate\n"
+                    "KJP 3,SS Locker 8 compartment,nos,18500\n"
+                    "IPC-200,SS IPC Intermediate Product Container,nos,22000\n")
+        items = quoting.load_rates(unrelated)
+        folder = os.path.join(self.folder, "INQ-2")
+        os.makedirs(folder)
+        ocr.remember(folder, "[crop.png]\nSS")        # all the OCR recovered
+        from test_inquiry_ui import message
+        row = register.from_message(message(body=""))
+        row["Folder"] = folder
+        row["Product asked"] = "SS (read from the picture)"
+        register.save([row], mailflow.Paths(self.folder).register_csv)
+        with _NoSave():
+            dialog = UI.InquiryDialog(self.cfg)
+            dialog._refresh_register()
+            q = UI.QuotationDialog(self.cfg, dialog._register_rows[0], items, dialog)
+        self.assertFalse(q._confident)
+        self.assertEqual(q.verdict.text(), "Check this")
 
 
 class TheFilesStepSpeaksPlainly(unittest.TestCase):
