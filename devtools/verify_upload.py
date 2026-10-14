@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 
@@ -63,20 +64,28 @@ def _list_assets(repo: str, release_id: int) -> set[str]:
     return {line for line in out.splitlines() if line}
 
 
-def expected_flat_names(manifest_path: str, platform_tag: str) -> dict[str, str]:
-    """{flat_name: local_relative_path} for every file that needs an
-    uploaded asset — matches flatten_update_assets.py's own skip rules:
-    no symlinks (recreated from the manifest's own `symlink` field), no
-    zero-byte files (GitHub refuses to host them; updater.py creates them
-    directly)."""
+def expected_flat_names(manifest_path: str, platform_tag: str,
+                        part: int = 1) -> dict[str, str]:
+    """{flat_name: local_relative_path} for every file of release `part` that
+    needs an uploaded asset — matches flatten_update_assets.py's own skip
+    rules: no symlinks (recreated from the manifest's own `symlink` field),
+    no zero-byte files (GitHub refuses to host them; updater.py creates them
+    directly). A build too big for one release is hosted across several
+    (update_manifest.assign_parts); this checks one of them."""
     token = open(manifest_path, encoding="utf-8").read().strip()
     payload = UM.verify(token, public_keys=K.UPDATE_PRODUCTION)
     out = {}
     for entry in payload["files"]:
-        if "symlink" in entry or entry.get("size", 0) == 0:
-            continue
-        out[UM.flat_name(platform_tag, entry["path"])] = entry["path"]
+        if UM.is_hosted(entry) and UM.part_of(entry) == part:
+            out[UM.flat_name(platform_tag, entry["path"])] = entry["path"]
     return out
+
+
+def part_of_tag(tag: str) -> int:
+    """Which part an assets-release tag is: `v1.6.3-assets-windows-x64` is
+    part 1, `v1.6.3-assets-windows-x64-2` part 2."""
+    m = re.search(r"-assets-.*-(\d+)$", tag)
+    return int(m.group(1)) if m else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -90,8 +99,10 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     release_id = _release_id(args.repo, args.tag)
-    expected = expected_flat_names(args.manifest_path, args.platform_tag)
-    print(f"{args.platform_tag}: manifest expects {len(expected)} assets")
+    part = part_of_tag(args.tag)
+    expected = expected_flat_names(args.manifest_path, args.platform_tag, part)
+    print(f"{args.platform_tag}: manifest expects {len(expected)} assets "
+          f"on {args.tag} (part {part})")
 
     actual = _list_assets(args.repo, release_id)
     missing = sorted(name for name in expected if name not in actual)

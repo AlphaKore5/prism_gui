@@ -50,17 +50,22 @@ def main(argv: list[str] | None = None) -> int:
     manifest = update_manifest.build(args.root_dir, args.version)
     # GitHub caps a release at 1000 assets, and every non-empty regular
     # file in this list becomes one (symlinks and empty files are recreated
-    # by the client). 1.4.1's Linux build had 1022 and could not be
-    # published in full; packaging/prism.spec now trims licence texts and
-    # .pyi stubs to stay under. Fail the build here, where the count is
-    # known, rather than an hour later in devtools/release_all.py.
-    uploadable = sum(1 for e in manifest["files"]
-                     if "symlink" not in e and e.get("size", 0) > 0)
-    if uploadable > 1000:
-        p.error(f"{uploadable} files would need uploading as release assets; "
-                "GitHub allows 1000 per release. Trim the bundle in "
-                "packaging/prism.spec (see the dist-info/.pyi filter).")
-    print(f"{uploadable} uploadable files (GitHub cap 1000)")
+    # by the client). 1.4.1's Linux build had 1022; packaging/prism.spec
+    # trims licence texts and .pyi stubs, which held the line until 1.6.2,
+    # whose STEP engine (cadquery, OCP, vtk) took Windows to 1466 and Linux
+    # and macOS to 1542. A build over one release's worth is now hosted
+    # across several (update_manifest.assign_parts): each file names its
+    # part in the manifest, part 1 stays where every older client looks.
+    # What still fails the build is a bundle needing more parts than the
+    # tooling supports -- which would be a bundle someone should look at.
+    parts = update_manifest.assign_parts(manifest)
+    uploadable = sum(1 for e in manifest["files"] if update_manifest.is_hosted(e))
+    if parts > update_manifest.MAX_ASSET_PARTS:
+        p.error(f"{uploadable} files would need {parts} release parts; "
+                f"at most {update_manifest.MAX_ASSET_PARTS} are supported. "
+                "Trim the bundle in packaging/prism.spec.")
+    print(f"{uploadable} uploadable files -> {parts} release part(s) of up to "
+          f"{update_manifest.ASSETS_PER_RELEASE} (GitHub cap 1000 each)")
     # Every symlink the manifest carries must resolve to something else the
     # manifest carries. The 1.5.4 macOS manifest did not record the
     # framework `Versions/Current` directory links, so the staged bundle

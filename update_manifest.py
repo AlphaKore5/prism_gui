@@ -141,6 +141,63 @@ def flat_name(platform_tag: str, rel: str) -> str:
     return f"{platform_tag}__long__{digest}{ext}"
 
 
+# ── hosting a build across several GitHub releases ─────────────────────────
+# GitHub caps a release at 1000 assets. 1.6.1's Windows build was 991 files;
+# STEP's cadquery/OCP/vtk stack took 1.6.2 to 1466 (Linux and macOS 1542), and
+# every build after it would only grow, so a platform whose build needs more
+# than one release's worth is hosted across several: `<tag>-assets-<platform>`
+# (part 1, exactly where every older build and client already look), then
+# `<tag>-assets-<platform>-2`, `-3`, … Each file names its part in the signed
+# manifest, so the updater and the release tooling read ONE answer from ONE
+# source. Part 1 carries no key at all: a manifest small enough for a single
+# release is byte-for-byte what it always was.
+ASSETS_PER_RELEASE = 900        # under 1000, for the slack a retry or a stray file needs
+MAX_ASSET_PARTS = 9
+
+
+def is_hosted(entry: dict[str, Any]) -> bool:
+    """Does this manifest entry need a release asset? Symlinks are recreated
+    from the manifest and zero-byte files created directly (GitHub refuses to
+    host them) — both match packaging/flatten_update_assets.py's skip rules."""
+    return "symlink" not in entry and entry.get("size", 0) > 0
+
+
+def assign_parts(manifest: dict[str, Any]) -> int:
+    """Stamp `part` on every hosted file past the first ASSETS_PER_RELEASE, in
+    the manifest's (path-sorted) order; return how many releases the build
+    needs (at least 1). Deterministic: same manifest in, same parts out."""
+    hosted = 0
+    for entry in manifest["files"]:
+        if not is_hosted(entry):
+            entry.pop("part", None)
+            continue
+        part = hosted // ASSETS_PER_RELEASE + 1
+        if part > 1:
+            entry["part"] = part
+        else:
+            entry.pop("part", None)
+        hosted += 1
+    return max(1, -(-hosted // ASSETS_PER_RELEASE))
+
+
+def part_of(entry: dict[str, Any]) -> int:
+    """Which release hosts this entry's file: 1 unless the manifest says
+    otherwise. Anything but a plain integer 2..MAX_ASSET_PARTS is refused — it
+    is spliced into a download URL."""
+    if "part" not in entry:
+        return 1
+    part = entry["part"]
+    if type(part) is not int or not 2 <= part <= MAX_ASSET_PARTS:
+        raise ManifestError("malformed", f"Update manifest names an unusable "
+                                          f"asset part for {entry.get('path')!r}.")
+    return part
+
+
+def parts_suffix(part: int) -> str:
+    """The assets-release tag's tail: "" for part 1, "-2", "-3", … after."""
+    return "" if part <= 1 else f"-{part}"
+
+
 # ── building the (unsigned) payload ─────────────────────────────────────────
 def build(root_dir: str, version: str) -> dict[str, Any]:
     """Walk `root_dir` (a built app directory, e.g. dist/Prism) and list every
@@ -369,6 +426,7 @@ def verify(token: str, *, public_keys: dict[str, str],
         raise ManifestError("malformed", "Update manifest has no file list.")
     for entry in files:
         _check_safe_path(entry.get("path") if isinstance(entry, dict) else None)
+        part_of(entry)          # raises on a `part` that is not a plain 2..9
 
     return payload
 

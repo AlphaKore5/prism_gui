@@ -120,8 +120,11 @@ def _version_from_tag(tag: str) -> str:
     return tag[1:] if tag.startswith("v") else tag
 
 
-def _assets_tag(tag: str, platform_tag: str) -> str:
-    return f"{tag}-assets-{platform_tag}"
+def _assets_tag(tag: str, platform_tag: str, part: int = 1) -> str:
+    """Part 1 is `<tag>-assets-<platform>` — where every older build and
+    client look; a build too big for one release (GitHub allows 1000 assets
+    each) continues in `-2`, `-3`, … — see update_manifest.assign_parts."""
+    return f"{tag}-assets-{platform_tag}{UM.parts_suffix(part)}"
 
 
 def _release_exists(repo: str, tag: str) -> bool:
@@ -160,17 +163,22 @@ def already_signed(repo: str, tag: str, platform_tag: str) -> bool:
     return out != "0"
 
 
-def expected_flat_names(manifest_path: str, platform_tag: str) -> dict[str, str]:
-    """{flat_name: manifest path} for every file needing an uploaded
+def expected_flat_names(manifest_path: str,
+                        platform_tag: str) -> dict[int, dict[str, str]]:
+    """{part: {flat_name: manifest path}} for every file needing an uploaded
     asset — matches flatten_update_assets.py's own skip rules: no
     symlinks (recreated from the manifest's own `symlink` field), no
     zero-byte files (GitHub refuses to host them; updater.py creates
-    them directly)."""
+    them directly). Grouped by the release each file belongs to — the
+    signed manifest's own `part` for it (1 when it names none)."""
     token = open(manifest_path, encoding="utf-8").read().strip()
     payload = UM.verify(token, public_keys=K.UPDATE_PRODUCTION)
-    return {UM.flat_name(platform_tag, e["path"]): e["path"]
-           for e in payload["files"]
-           if "symlink" not in e and e.get("size", 0) > 0}
+    out: dict[int, dict[str, str]] = {}
+    for e in payload["files"]:
+        if UM.is_hosted(e):
+            out.setdefault(UM.part_of(e), {})[
+                UM.flat_name(platform_tag, e["path"])] = e["path"]
+    return out
 
 
 def upload_missing(repo: str, assets_tag: str, assets_dir: str,
@@ -219,7 +227,6 @@ def upload_missing(repo: str, assets_tag: str, assets_dir: str,
 def do_platform(repo: str, tag: str, run_id: str, work: str,
                 platform_tag: str, matrix_os: str, force: bool) -> None:
     version = _version_from_tag(tag)
-    assets_tag = _assets_tag(tag, platform_tag)
     unsigned = os.path.join(work, f"manifest.{platform_tag}.unsigned.json")
     signed = os.path.join(work, f"manifest.{platform_tag}.signed")
     assets_dir = os.path.join(work, f"update-assets-{platform_tag}")
@@ -262,24 +269,30 @@ def do_platform(repo: str, tag: str, run_id: str, work: str,
         # _manifest_url() reads it from there via "latest/download".
         run(["gh", "release", "upload", tag, "-R", repo, "--clobber", signed])
 
-    if not _release_exists(repo, assets_tag):
-        run(["gh", "release", "create", assets_tag, "-R", repo,
-            "--prerelease",
-            "--title", f"{tag} update assets — {platform_tag}",
-            "--notes", f"Per-file update assets for {tag}, {platform_tag} "
-                      f"only. Not for direct download — see {tag} for "
-                      f"the actual installers. Fetched by Prism's "
-                      f"in-app updater; --prerelease so it never "
-                      f"becomes GitHub's \"latest\" release."])
-
-    expected = expected_flat_names(signed, platform_tag)
-    still_missing = upload_missing(repo, assets_tag, assets_dir, expected)
-    if still_missing:
-        raise RuntimeError(
-            f"{platform_tag}: {len(still_missing)} files still missing "
-            f"from {assets_tag} after upload + retry: {still_missing[:10]}")
-    print(f"  {assets_tag}: confirmed all {len(expected)} files present "
-         f"(version {version})")
+    expected_by_part = expected_flat_names(signed, platform_tag)
+    parts = max(expected_by_part, default=1)
+    for part in range(1, parts + 1):
+        expected = expected_by_part.get(part, {})
+        assets_tag = _assets_tag(tag, platform_tag, part)
+        of = f", part {part} of {parts}" if parts > 1 else ""
+        if not _release_exists(repo, assets_tag):
+            run(["gh", "release", "create", assets_tag, "-R", repo,
+                "--prerelease",
+                "--title", f"{tag} update assets — {platform_tag}{of}",
+                "--notes", f"Per-file update assets for {tag}, "
+                          f"{platform_tag} only{of}. Not for direct "
+                          f"download — see {tag} for the actual "
+                          f"installers. Fetched by Prism's in-app updater; "
+                          f"--prerelease so it never becomes GitHub's "
+                          f"\"latest\" release."])
+        still_missing = upload_missing(repo, assets_tag, assets_dir, expected)
+        if still_missing:
+            raise RuntimeError(
+                f"{platform_tag}: {len(still_missing)} files still missing "
+                f"from {assets_tag} after upload + retry: "
+                f"{still_missing[:10]}")
+        print(f"  {assets_tag}: confirmed all {len(expected)} files present "
+             f"(version {version})")
 
 
 def main(argv: list[str] | None = None) -> int:

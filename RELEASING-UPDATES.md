@@ -97,6 +97,19 @@ release upload` still exited 0. So:
     `updater.py`'s `_file_url()` reads these via an explicit tag (built
     from the manifest's own `version` field), never "latest" — three
     releases can't all be "latest" at once.
+  - `<tag>-assets-<platform>-2`, `-3`, … — only when a platform's bundle
+    is bigger than one release holds (more than 900 hosted files, see
+    `update_manifest.ASSETS_PER_RELEASE`). 1.6.2's STEP engine (cadquery,
+    OCP, vtk) took Windows to 1466 files and Linux/macOS to 1542, which
+    failed the whole build at the manifest step against the 1000 cap; the
+    files are now split. Each file's part is in the **signed manifest**
+    (`"part": 2`; part 1 has no key), so `packaging/manifest.py` assigns
+    them, `updater.py` fetches each from the release that holds it, and
+    `release_all.py` creates and fills every part for you — nothing to do
+    by hand. A build under one release's worth looks exactly as before.
+    An older client (≤ 1.6.2) only looks in part 1: its in-app update of a
+    multi-part version fails cleanly and falls back to the browser download,
+    after which it is on a build that can use the parts.
 
 If you need to redo just one platform's asset upload by hand (a partial
 `release_all.py` failure, say), `devtools/verify_upload.py` does the

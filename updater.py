@@ -103,8 +103,12 @@ UPDATE_HOST = f"https://github.com/{UPDATE_REPO}/releases/latest/download"
 # manifest's own `version` field — never "latest", since three releases
 # can't all BE "latest" at once. RELEASING-UPDATES.md's publish step
 # creates these alongside the main tagged release.
-def _assets_release_tag(version: str, tag: str) -> str:
-    return f"v{version}-assets-{tag}"
+def _assets_release_tag(version: str, tag: str, part: int = 1) -> str:
+    # `part` 1 is the release every build has always used; a build too big
+    # for one release (STEP's cadquery stack took 1.6.2 past GitHub's 1000
+    # assets) hosts its later files in `-2`, `-3`, … — each file's part is in
+    # the signed manifest (update_manifest.assign_parts).
+    return f"v{version}-assets-{tag}{update_manifest.parts_suffix(part)}"
 
 # Manifest fetch is a background/launch-time check, same spirit as the
 # licence server's default TIMEOUT — fail fast, never make launch wait.
@@ -431,7 +435,7 @@ def _manifest_url() -> str:
     return f"{UPDATE_HOST}/manifest.{platform_tag()}.signed"
 
 
-def _file_url(version: str, relpath: str) -> str:
+def _file_url(version: str, relpath: str, part: int = 1) -> str:
     # GitHub release assets can't contain "/" in their filename, so a
     # relative path is flattened for the wire and restored on write. This is
     # a hosting-layer detail, not a security one — the manifest's own `path`
@@ -452,7 +456,7 @@ def _file_url(version: str, relpath: str) -> str:
     # the first place. `version` comes from the manifest THIS SAME CALLER
     # already verified (see stage_update's `check.version`), never from
     # anywhere else — the tag is derived data, not a second trust input.
-    tag = _assets_release_tag(version, platform_tag())
+    tag = _assets_release_tag(version, platform_tag(), part)
     return (f"https://github.com/{UPDATE_REPO}/releases/download/{tag}/"
            f"{update_manifest.flat_name(platform_tag(), relpath)}")
 
@@ -589,7 +593,8 @@ def stage_update(check: UpdateCheck, install_dir: str, *,
                 if entry.get("mode"):
                     os.chmod(dest, 0o644 | entry["mode"])
             elif entry["path"] in to_fetch:
-                url = _file_url(check.version, entry["path"])
+                url = _file_url(check.version, entry["path"],
+                                update_manifest.part_of(entry))
                 # max_bytes cuts the stream off the instant more than the
                 # manifest's declared size has arrived — see _get()'s
                 # docstring for why this is done during the read, not as a
