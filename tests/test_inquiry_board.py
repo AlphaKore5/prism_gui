@@ -541,3 +541,32 @@ class NarrowWindow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OpeningTheScreen(unittest.TestCase):
+    """1.6.2 shipped a screen that crashed on open: main_window passed
+    enter() a keyword the screen did not take
+    (TypeError: enter() got an unexpected keyword argument 'view')."""
+
+    def test_enter_takes_every_keyword_main_window_passes(self):
+        import ast
+        import inspect
+        path = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "main_window.py")
+        tree = ast.parse(open(path, encoding="utf-8").read())
+        calls = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "enter"
+                 and isinstance(n.func.value, ast.Attribute)
+                 and n.func.value.attr == "inquiry_work_panel"]
+        self.assertTrue(calls, "main_window no longer opens the inquiry screen")
+        accepted = set(inspect.signature(UI.InquiryDialog.enter).parameters)
+        for call in calls:
+            for kw in call.keywords:
+                self.assertIn(kw.arg, accepted)
+
+    def test_opening_the_screen_the_way_main_window_does(self):
+        dialog = make_dialog([row(1, "New"), row(2, "Quoted", **Q)])
+        dialog.enter(tab=0, auto_check=False, view="auto")
+        self.assertIsNotNone(dialog.board)

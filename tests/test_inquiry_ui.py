@@ -3551,15 +3551,15 @@ class DeletingSeveralAtOnce(unittest.TestCase):
     def _numbers(self):
         return [r["Inquiry no"] for r in register.load(self.paths.register_csv)]
 
-    def test_the_register_tables_take_several_rows_and_all_mail_does_not(self):
+    def test_every_table_takes_several_rows(self):
+        # All mail has its own "Delete selected" since 1.6.2, so it picks
+        # several rows like the register tables do.
         from PySide6.QtWidgets import QAbstractItemView
         for table in (self.dialog.to_quote_table, self.dialog.followups,
                       self.dialog.register_table, self.dialog.replies_table,
-                      self.dialog.orders_table):
+                      self.dialog.orders_table, self.dialog.arrived):
             self.assertEqual(table.selectionMode(),
                              QAbstractItemView.ExtendedSelection)
-        self.assertEqual(self.dialog.arrived.selectionMode(),
-                         QAbstractItemView.SingleSelection)
 
     def test_two_picked_rows_go_with_one_question(self):
         self._pick(self.dialog.register_table, 0, 2)

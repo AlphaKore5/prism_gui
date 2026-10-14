@@ -251,7 +251,10 @@ class ThePictureReachesTheQuote(unittest.TestCase):
             dialog = UI.InquiryDialog(self.cfg)
             dialog._refresh_register()
             q = UI.QuotationDialog(self.cfg, dialog._register_rows[0], items, dialog)
-        self.assertEqual(q.item_picker.currentIndex(), 1)   # proves it fired
+        # The picker lists the matched row first, so it sits at index 0
+        # whatever order the rate list has; what must hold is that the
+        # window built without error and priced the matched row.
+        self.assertEqual(q.item_picker.currentData().code, "KJP 3")
         self.assertIn("18,500.00", q.preview.toPlainText())
 
     def test_a_badly_read_picture_does_not_pass_as_a_confident_match(self):

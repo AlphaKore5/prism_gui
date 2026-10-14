@@ -152,6 +152,7 @@ class PipelineActions:
             "lost": self._mark_lost, "edit": self._edit_row,
             "folder": self._open_inquiry_folder, "delete": self._delete_inquiry,
             "history": self._show_history,
+            "attachments": self._show_attachments,
             # the pipeline's own
             "ask_details": self._ask_details,
             "chase_details": self._chase_details,

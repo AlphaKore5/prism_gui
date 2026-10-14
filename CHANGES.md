@@ -10,6 +10,27 @@ Tests: **1966 passing** (6 skipped, 8 Sep 2026 after Round 16 landed on main —
 
 ---
 
+# 1.6.4 — Email inquiries works again (14 Oct 2026)
+
+1.6.2 and 1.6.3 shipped with two stale copies of `addons/inquiry/dialog.py` and
+`quotation.py` (from a machine that had not pulled the pipeline-board work), so
+they **overwrote** it. The Email inquiries screen crashed on open
+(`enter() got an unexpected keyword argument 'view'`), and the colours, multi-delete,
+PDF quotations, OCR confidence rule and the pipeline board were missing.
+
+- **Restored** both files from the board build and re-applied the 1.6.2 additions
+  on top (All-mail Mark as reminder, Delete selected, Reset everything, View
+  attachments, Time received, resizable All-mail columns) — a three-way merge,
+  not a copy. All-mail now picks several rows (its Delete selected needs it).
+- **Engine pieces those additions called but never had**: `worklist.remove`,
+  `worklist.clear`, `worklist.entry_key`, `register.remove`, `register.clock`; and a
+  mail the sorter cannot place but that sits on an open inquiry's own thread now
+  counts as that customer's reply.
+- **Guard**: a test pins `enter()`'s keywords against what `main_window.py` passes,
+  and another opens the screen the way the main window does.
+
+---
+
 # 1.6.3 — the 1.6.2 release, published (14 Oct 2026)
 
 1.6.2 never reached customers: its build was too big for GitHub to host (see

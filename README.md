@@ -67,6 +67,43 @@ First launch opens the licence screen, then Setup (API key, profile, one agent
 per category, Chrome version) if `~/.prism/config.json` isn't already
 configured from the CLI.
 
+### If Prism will not start
+
+**Crash on launch from a VS Code terminal** — the shell prints
+`Trace/breakpoint trap` or `exit 133`, and `GLib-GIO-ERROR: Settings schema
+'org.gnome.settings-daemon.plugins.xsettings' does not contain a key named
+'antialiasing'`. Prism is fine: a snap-installed VS Code (Ubuntu) puts its own
+GTK/GLib variables into every terminal, and Qt aborts on them. Start it with the
+script, which clears them first:
+
+```bash
+cd prism_gui
+./run-prism.sh                      # uses .venv/bin/python if there is one
+```
+
+Or by hand, in the same terminal:
+
+```bash
+unset GTK_PATH GIO_MODULE_DIR GTK_EXE_PREFIX GTK_IM_MODULE_FILE GSETTINGS_SCHEMA_DIR GTK_MODULES LOCPATH
+export XDG_DATA_DIRS="$XDG_DATA_DIRS_VSCODE_SNAP_ORIG"
+.venv/bin/python main.py
+```
+
+Starting it from the desktop's own terminal (not VS Code's) needs none of this.
+
+**Other checks**
+
+- Use the project's virtualenv: `source .venv/bin/activate`, or call
+  `.venv/bin/python`. The system `python3` may lack PySide6.
+- Fetch the engine once: `git submodule update --init`.
+- No licence server? `PRISM_LICENSE_OFFLINE_DEV=1 PRISM_LICENSE_SERVER=http://127.0.0.1:9 ./run-prism.sh`
+- Check the install without opening a window:
+  `QT_QPA_PLATFORM=offscreen PRISM_SELFTEST=1 .venv/bin/python main.py`
+  — every line should start with a tick.
+- Never run the tests while a Prism window is open, and keep UI test and
+  screenshot scripts away from your real data by setting `HOME` to a throwaway
+  folder (the engine reads `~/.prism` directly).
+
 ### Working on it without a licence server
 
 ```bash
