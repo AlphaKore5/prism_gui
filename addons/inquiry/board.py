@@ -958,8 +958,21 @@ class BoardView(QWidget):
         d = CB.get_register().parse_date(row.get(key, ""))
         return "📅 " + d.strftime("%d %b").lstrip("0") if d else ""
 
+    @staticmethod
+    def _newest_first(items):
+        """The mail that just arrived on top: with 15 inquiries the newest,
+        listed last, was below the fold and read as "it never arrived"."""
+        register = CB.get_register()
+
+        def key(x):
+            row = x[0]
+            d = register.parse_date(row.get("Date received", ""))
+            return (d.toordinal() if d else 0, row.get("Time received", "") or "")
+        return sorted(items, key=key, reverse=True)
+
     def _fill_inquiry(self, col, items, p):
         details = (p.get("steps") or {}).get("details", True)
+        items = self._newest_first(items)
         yours = [x for x in items if x[1] != "them"]
         theirs = [x for x in items if x[1] == "them"]
         if details and yours:
