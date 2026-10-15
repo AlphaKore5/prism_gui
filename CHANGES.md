@@ -10,6 +10,40 @@ Tests: **1966 passing** (6 skipped, 8 Sep 2026 after Round 16 landed on main —
 
 ---
 
+# 1.6.5 — STEP Edit actually finishes, and a build's confirmation (15 Oct 2026)
+
+A customer running Edit on the same model more than once got an
+identically-named file every time, and once the build finished saw no sign of
+where it landed. Both were engine/GUI pieces that had been written but never
+reached a release on `prism_terminal`.
+
+- **Every build's filename is now stamped** with when it was written
+  (`stepfile.modified_name()`), so repeat Edits of the same model stop
+  overwriting each other under one flat name.
+- **The green "Saved — the file is at ..." confirmation** that already showed
+  after a measurement now shows after a build too — a completed Edit gave no
+  visible sign of where the modified file landed.
+- **A reviewing agent's wordier part name** (e.g. a planner adding "— 1 NOS"
+  to a measured part's real name) is now accepted as a prefix match, not
+  required to match exactly — before this, a real, reviewed plan could
+  silently apply nothing, or raise "Nothing in the plan could be applied"
+  outright.
+- **The in-app review page** no longer tells the reader to "go back to the
+  terminal and answer Y" — that page is shown inside Prism's own Build/Cancel
+  dialog too, where there is no terminal to go back to.
+- **A model's saved conversation thread** (`names()["conversation"]`) now
+  actually saves — the GUI has called this key since 1.6.2, but the engine
+  pinned into that release never carried it, so every save silently failed.
+- Gerber: a tool-table-looking line plus an X-looking line anywhere in an
+  unrelated file (a BOM, a dimension note, a panel legend) no longer reads as
+  an Excellon drill file — both checks also require the `%` every real
+  Excellon file has, header or not.
+- Carries 1.6.4's Email inquiries fix forward (see below) — this is the
+  first release with both the STEP fixes and the pipeline-board restoration
+  together.
+
+---
+
 # 1.6.4 — Email inquiries works again (14 Oct 2026)
 
 1.6.2 and 1.6.3 shipped with two stale copies of `addons/inquiry/dialog.py` and
