@@ -10,6 +10,22 @@ Tests: **1966 passing** (6 skipped, 8 Sep 2026 after Round 16 landed on main —
 
 ---
 
+# 1.6.6 — a removed file could still be measured and billed (15 Oct 2026)
+
+**1.6.5 was never signed for in-app update — this release supersedes it.**
+CI's own Windows test run caught a real bug before anything shipped: on
+Windows, clicking a file chip's "x" in STEP or Gerber could make the chip
+disappear while the file stayed in what Generate actually measures — a
+path-representation mismatch between AskPanel's own abspath'd storage
+and each dialog's separate, unnormalised list. Gerber had a second copy
+of the same root cause that could double-count a single dropped file.
+Both dialogs now store and match paths the same way AskPanel does
+(abspath'd, compared by normcase), with a regression test per add-on
+that reproduces the mismatch on any OS, not just Windows. See 1.6.5's
+entry below for everything else carried forward unchanged.
+
+---
+
 # 1.6.5 — STEP Edit actually finishes, and a build's confirmation (15 Oct 2026)
 
 A customer running Edit on the same model more than once got an
