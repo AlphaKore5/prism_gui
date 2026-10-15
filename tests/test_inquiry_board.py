@@ -219,6 +219,31 @@ class Round2(unittest.TestCase):
         self.assertIn("numbers_in_use", body)
         self.assertIn("taken=taken", body)
 
+    def test_an_order_with_no_priceable_line_sends_no_zero_acknowledgement(self):
+        """Found live 2026-10-15: a PO whose text names no rate-list code
+        priced to zero lines, and the acknowledgement still went out as a
+        quotation for 0.00 with a new quotation number."""
+        import csv
+        folder = tempfile.mkdtemp()
+        rates = os.path.join(folder, "rates.csv")
+        with open(rates, "w", newline="", encoding="utf-8") as f:
+            csv.writer(f).writerows([["Code", "Description", "Unit", "Rate"],
+                                     ["KJP 3", "SS Locker (8 Comp)", "nos", "18000"]])
+        nopo = row(1, "Accepted", **{"No quotation": "yes"})
+        nopo["Product asked"] = "something the rate list does not name"
+        register.save([nopo], mailflow.Paths(folder).register_csv)
+        cfg = cfg_for(folder)
+        cfg["inquiry"]["rate_list"] = rates
+        dialog = UI.InquiryDialog(cfg)
+        dialog.act_on = dialog.act_on
+        letters, said = [], []
+        dialog._letter = lambda *a, **k: letters.append(a)
+        dialog._explain = said.append
+        dialog.act_on(dialog._rows()[0], "price_po")
+        self.assertEqual(letters, [])
+        self.assertTrue(said)
+        self.assertEqual(dialog._rows()[0].get("Quotation no", ""), "")
+
     def test_r11_a_due_proforma_offers_send_first(self):
         p = BOARD.pipeline({"inquiry": {"pipeline": {"steps": {"proforma": True}}}})
         r = row(1, "Accepted", Proforma="to send", **Q, **{"PO number": "PO-1"})

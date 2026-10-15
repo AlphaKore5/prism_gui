@@ -624,6 +624,15 @@ class PipelineActions:
             self._explain(str(e))
             return
         po = inquiry_config.word(self.cfg, "po")
+        if not priced.lines:
+            # Nothing on the order matched the rate list with certainty: an
+            # acknowledgement for ₹0 with a quotation number would go out
+            # under the owner's name. Say so and let them price it by hand.
+            self._explain(i18n.t(
+                "Prism could not match any line of this order to your rate "
+                "list, so there is nothing to price yet. Use \"Prepare a "
+                "quotation\" and pick the items yourself."))
+            return
         dlg = _PricedOrderDialog(priced, self._money, tax_label, po, self)
         if dlg.exec() != QDialog.Accepted:
             return
