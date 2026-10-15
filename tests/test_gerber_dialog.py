@@ -553,6 +553,20 @@ class RemovingAChipActuallyRemovesTheJob(unittest.TestCase):
         self.assertEqual(dlg.paths, [])
         self.assertFalse(dlg.generate_btn.isEnabled())
 
+    def test_a_differently_spelled_but_equal_path_is_still_removed(self):
+        """Real-world version of the bug above, reproducible on any OS:
+        AskPanel always stores (and file_removed always hands back) the
+        abspath'd form. A job added under a path that abspath would
+        rewrite — a redundant './' segment here, a Windows QFileDialog's
+        forward slashes in real use — used to survive in dlg.paths
+        unmatched against the rewritten form file_removed emitted, so the
+        chip vanished but the job stayed in what Generate measures."""
+        dlg = _dialog()
+        dlg._on_files_added(["/nowhere/./a.zip"])
+        self.assertEqual(dlg.paths, [os.path.abspath("/nowhere/a.zip")])
+        dlg.ask.remove_path(os.path.abspath("/nowhere/a.zip"))
+        self.assertEqual(dlg.paths, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -532,11 +532,22 @@ class StepDialog(PrismDialog):
     # ── files ───────────────────────────────────────────────────────────
 
     def _on_files_added(self, paths: list):
+        # Stored as AskPanel itself stores them — abspath'd — so this
+        # dialog's own list (what Generate actually measures) and the
+        # chip's path (what file_removed hands back on removal) are always
+        # the same string. A raw, un-normalised compare let a Windows
+        # QFileDialog's forward-slash path survive here unmatched against
+        # the backslashed, abspath'd one file_removed later emits — the
+        # chip vanished but the file stayed in self.paths and was measured
+        # and billed anyway.
+        have = {os.path.normcase(sp) for sp in self.paths}
         models, other = [], []
         for p in paths:
             if p and p.lower().endswith(MODEL_EXTS):
-                if p not in self.paths:
-                    models.append(p)
+                ap = os.path.abspath(os.path.expanduser(p))
+                if os.path.normcase(ap) not in have:
+                    have.add(os.path.normcase(ap))
+                    models.append(ap)
             elif p:
                 other.append(os.path.basename(p))
         skipped = (i18n.t("Only .step / .stp models are measured — skipped: ")
@@ -561,9 +572,12 @@ class StepDialog(PrismDialog):
     def _on_file_removed(self, path: str):
         """The chip's own 'x' only ever touched AskPanel's private list —
         this keeps the dialog's real one (what Generate actually measures)
-        in step with what the person sees attached."""
-        if path in self.paths:
-            self.paths.remove(path)
+        in step with what the person sees attached. Matched by normcase,
+        not exact string equality — AskPanel already abspath's everything
+        it stores, but a case-only difference (Windows' filesystem is
+        case-insensitive) would otherwise still slip past."""
+        key = os.path.normcase(path)
+        self.paths = [p for p in self.paths if os.path.normcase(p) != key]
         self.step2.setVisible(bool(self.paths))
         self.generate_btn.setEnabled(bool(self.paths))
         n = len(self.paths)

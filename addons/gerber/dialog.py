@@ -525,13 +525,32 @@ class GerberDialog(PrismDialog):
     # ── files ───────────────────────────────────────────────────────────
 
     def _on_files_added(self, paths: list):
-        new = [p for p in paths if p not in self.paths]
+        # Stored as AskPanel itself stores them — abspath'd — so this
+        # dialog's own list (what Generate actually measures) and the
+        # chip's path (what file_removed hands back on removal) are always
+        # the same string. Two bugs this fixes together: a raw compare let
+        # a Windows QFileDialog's forward-slash path survive here unmatched
+        # against the backslashed, abspath'd one file_removed later emits
+        # (the chip vanished but the file stayed in self.paths and was
+        # measured and billed anyway); and add_paths() below used to emit
+        # its own files_added right back at this method with its (now
+        # differently-spelled) abspath'd copies, which this method's old
+        # raw compare didn't recognise as already-added — the same file
+        # landed in self.paths twice from one drop.
+        have = {os.path.normcase(sp) for sp in self.paths}
+        new = []
+        for p in paths:
+            if not p:
+                continue
+            ap = os.path.abspath(os.path.expanduser(p))
+            if os.path.normcase(ap) not in have:
+                have.add(os.path.normcase(ap))
+                new.append(ap)
         if not new:
             return
         self.paths += new
         self.clean_btn.setEnabled(True)
-        known = self.ask.paths()
-        self.ask.add_paths([p for p in new if p not in known])
+        self.ask.add_paths(new, emit=False)
         # Deliberately NOT measuring yet. Measuring on drop left no moment
         # to choose the client's format first — the CSV was already made.
         # Generate is the go button.
@@ -544,9 +563,12 @@ class GerberDialog(PrismDialog):
     def _on_file_removed(self, path: str):
         """The chip's own 'x' only ever touched AskPanel's private list —
         this keeps the dialog's real one (what Generate actually measures)
-        in step with what the person sees attached."""
-        if path in self.paths:
-            self.paths.remove(path)
+        in step with what the person sees attached. Matched by normcase,
+        not exact string equality — AskPanel already abspath's everything
+        it stores, but a case-only difference (Windows' filesystem is
+        case-insensitive) would otherwise still slip past."""
+        key = os.path.normcase(path)
+        self.paths = [p for p in self.paths if os.path.normcase(p) != key]
         self.clean_btn.setEnabled(bool(self.paths))
         self.generate_btn.setEnabled(bool(self.paths))
         if not self.paths:

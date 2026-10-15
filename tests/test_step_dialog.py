@@ -136,6 +136,20 @@ class TheDoorIsShutUntilAModelIsAttached(unittest.TestCase):
         self.assertEqual(dlg.paths, [])
         self.assertFalse(dlg.generate_btn.isEnabled())
 
+    def test_a_differently_spelled_but_equal_path_is_still_removed(self):
+        """Real-world version of the bug above, reproducible on any OS:
+        AskPanel always stores (and file_removed always hands back) the
+        abspath'd form. A model added under a path that abspath would
+        rewrite — a redundant './' segment here, a Windows QFileDialog's
+        forward slashes in real use — used to survive in dlg.paths
+        unmatched against the rewritten form file_removed emitted, so the
+        chip vanished but the file stayed in what Generate measures."""
+        dlg = _dialog()
+        dlg._on_files_added(["/nowhere/./Assem1.STEP"])
+        self.assertEqual(dlg.paths, [os.path.abspath("/nowhere/Assem1.STEP")])
+        dlg.ask.remove_path(os.path.abspath("/nowhere/Assem1.STEP"))
+        self.assertEqual(dlg.paths, [])
+
     def test_the_file_is_asked_for_before_the_question(self):
         """The question box and the choice of action stay out of sight
         until a model is attached — the file first, then what to do."""
