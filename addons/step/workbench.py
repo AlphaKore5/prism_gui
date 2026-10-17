@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 import i18n
+import paths
 import theme
 from widgets import controls as C
 
@@ -347,8 +348,18 @@ class _Sheet(QWidget):
         if pix.isNull():
             return False
         self._pix = pix
+        self._path = path
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(i18n.t("Click to open the drawing in its own window"))
         self.update()
         return True
+
+    def mousePressEvent(self, event):
+        # A drawing is for looking at closely: open it in the machine's own
+        # picture viewer, in another window.
+        if event.button() == Qt.LeftButton and getattr(self, "_path", ""):
+            paths.open_file(self._path)
+        super().mousePressEvent(event)
 
     def paintEvent(self, _event):
         p = QPainter(self)
@@ -702,7 +713,7 @@ class PlanPanel(QWidget):
         self.bar.hide()
 
     # the steps -----------------------------------------------------------
-    def set_plan(self, plan: dict | None):
+    def set_plan(self, plan: dict | None, agent: str = ""):
         self.rows.clear()
         self.bar.hide()
         if not plan:
@@ -712,6 +723,14 @@ class PlanPanel(QWidget):
             empty.setStyleSheet(f"color: {theme.NEUTRAL[500]}; padding: 16px;")
             self.rows.add(empty)
             return
+        if agent:
+            # Which AI wrote this plan.
+            who = QLabel(f"<span style='color:{theme.badge_color(agent)}'>●</span>"
+                         f"&nbsp;{i18n.t('Planned by')} <b>{agent}</b>")
+            who.setTextFormat(Qt.RichText)
+            who.setStyleSheet(f"color: {theme.NEUTRAL[600]}; font-size: 12px;"
+                              " padding: 8px 14px 0 14px;")
+            self.rows.add(who)
         changes = plan.get("changes", [])
         if not changes:
             self.rows.add(self._nothing())
@@ -903,6 +922,11 @@ class FilesPanel(QWidget):
         row = QFrame()
         row.setStyleSheet(f"border: none; border-bottom: 1px solid {_HAIR};"
                           " background: transparent;")
+        row.setCursor(Qt.PointingHandCursor)
+        # Anywhere on the row opens the file; "Show" below reveals it in the
+        # folder instead.
+        row.mousePressEvent = lambda e, p=path: (
+            paths.open_file(p) if e.button() == Qt.LeftButton else None)
         lay = QHBoxLayout(row)
         lay.setContentsMargins(16, 8, 16, 8)
         lay.setSpacing(10)
@@ -913,6 +937,18 @@ class FilesPanel(QWidget):
                         " font-size: 10px; font-weight: 800; padding: 6px 0;"
                         " border: none;")
         lay.addWidget(c, 0, Qt.AlignTop)
+        if ext in (".png", ".jpg", ".jpeg"):
+            # The picture itself, not only its name — click it to open it big.
+            pix = QPixmap(path)
+            if not pix.isNull():
+                thumb = QLabel()
+                thumb.setPixmap(pix.scaled(64, 48, Qt.KeepAspectRatio,
+                                           Qt.SmoothTransformation))
+                thumb.setFixedSize(68, 52)
+                thumb.setAlignment(Qt.AlignCenter)
+                thumb.setStyleSheet(f"border: 1px solid {_EDGE};"
+                                    " border-radius: 6px; background: white;")
+                lay.addWidget(thumb, 0, Qt.AlignTop)
         col = QVBoxLayout()
         col.setSpacing(2)
         name = QLabel(os.path.basename(path))
@@ -930,8 +966,8 @@ class FilesPanel(QWidget):
         for label, which in ((i18n.t("Open"), "o"), (i18n.t("Show"), "s")):
             lk = Link(label)
             lk.clicked.connect(
-                lambda w=which, p=path: QDesktopServices.openUrl(QUrl.fromLocalFile(
-                    p if w == "o" else os.path.dirname(p))))
+                lambda w=which, p=path: paths.open_file(
+                    p if w == "o" else os.path.dirname(p)))
             links.addWidget(lk)
         links.addStretch(1)
         col.addLayout(links)
@@ -970,18 +1006,40 @@ class _Markdown(QTextBrowser):
         self._cap = px
         self.fit()
 
-    def natural_height(self) -> int:
-        width = self.viewport().width() or self.width() or 320
+    def natural_height(self, width: int = 0) -> int:
+        m = self.contentsMargins()
+        # Padding from the app's style sheet is part of the box too.
+        outer = width or self.width()
+        width = (outer - m.left() - m.right()) if outer > 40 else 320
         self.document().setTextWidth(max(width, 120))
-        return int(self.document().size().height()) + 8
+        return int(self.document().size().height()) + m.top() + m.bottom() + 8
 
-    def fit(self):
-        h = self.natural_height()
-        self.setFixedHeight(min(h, self._cap) if self._cap else h)
+    def fit(self, width: int = 0):
+        if getattr(self, "_fitting", False):
+            return
+        self._fitting = True
+        try:
+            h = self.natural_height(width)
+            h = min(h, self._cap) if self._cap else h
+            if h != self.height() or self.minimumHeight() != h:
+                self.setFixedHeight(h)
+        finally:
+            self._fitting = False
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.fit()
+        # The width the widget has NOW, not the viewport's from before this
+        # resize — measuring with the old one wrapped to fewer lines than the
+        # text really takes and cut the last lines off.
+        self.fit(event.size().width())
+        QTimer.singleShot(0, self.fit)        # and once more when it has settled
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # The style sheet's font size is applied once the widget is shown;
+        # measure again then, or the text is taller than the box it was
+        # measured for and its last lines are cut off.
+        QTimer.singleShot(0, self.fit)
 
 
 class _Turn(QFrame):
@@ -1012,6 +1070,8 @@ class _Turn(QFrame):
         tone = {"Draft": "info", "Ask": "ok", "Edit": "warn"}.get(
             turn["action"], "neutral")
         hl.addWidget(chip(f"{number} · {turn['action']}", tone), 0, Qt.AlignTop)
+        if turn.get("agent") and turn["action"] in ("Ask", "Edit"):
+            hl.addWidget(chip(turn["agent"], "neutral"), 0, Qt.AlignTop)
         text = turn["question"] or (
             i18n.t("Measured and drew the dimensioned sheet")
             if turn["action"] == "Draft" else turn["file"])
@@ -1057,8 +1117,9 @@ class _Turn(QFrame):
         if turn["answer"]:
             from addons.step import sessions as SES
             self.answer = _Markdown(SES.normalize_markdown(turn["answer"]))
-            bl.addWidget(self._bubble(i18n.t("Prism"), "", mine=False,
-                                      body=self.answer))
+            bl.addWidget(self._bubble(
+                turn.get("agent") or i18n.t("Answer"), "", mine=False,
+                body=self.answer, agent=turn.get("agent", "")))
             self.more = Link(i18n.t("Show more  ▾"))
             self.more.clicked.connect(self._toggle)
             self.more.hide()
@@ -1070,16 +1131,18 @@ class _Turn(QFrame):
             if not pix.isNull():
                 thumb.setPixmap(pix.scaledToWidth(150, Qt.SmoothTransformation))
                 thumb.setCursor(Qt.PointingHandCursor)
-                thumb.setToolTip(turn["sheet"])
+                thumb.setToolTip(i18n.t(
+                    "Click to open the drawing in its own window"))
                 thumb.setStyleSheet(f"border: 1px solid {_EDGE}; border-radius:"
                                     " 6px; background: white;")
                 thumb.mousePressEvent = lambda _e, p=turn["sheet"]: \
-                    QDesktopServices.openUrl(QUrl.fromLocalFile(p))
+                    paths.open_file(p)
                 bl.addWidget(thumb, 0, Qt.AlignLeft)
         for f in turn.get("followups", []):
             bl.addWidget(self._bubble(i18n.t("You"), f.get("q", ""), mine=True))
             bl.addWidget(self._bubble(
-                f.get("agent") or i18n.t("Prism"), "", mine=False,
+                f.get("agent") or i18n.t("Answer"), "", mine=False,
+                agent=f.get("agent", ""),
                 body=_Markdown(__import__("addons.step.sessions", fromlist=["x"])
                                .normalize_markdown(f.get("a", "")))))
         for styled in turn.get("styled", []):
@@ -1105,7 +1168,8 @@ class _Turn(QFrame):
             QTimer.singleShot(0, self.settle)
 
     @staticmethod
-    def _bubble(who: str, text: str, mine: bool, body: QWidget | None = None):
+    def _bubble(who: str, text: str, mine: bool, body: QWidget | None = None,
+                agent: str = ""):
         box = QFrame()
         box.setObjectName("wbBubble")
         box.setAttribute(Qt.WA_StyledBackground, True)
@@ -1115,7 +1179,13 @@ class _Turn(QFrame):
         lay = QVBoxLayout(box)
         lay.setContentsMargins(10, 8, 10, 8)
         lay.setSpacing(3)
-        label = QLabel(who.upper())
+        if agent:
+            # Which AI gave this answer: its name, with its own colour.
+            label = QLabel(f"<span style='color:{theme.badge_color(agent)}'>●</span>"
+                           f"&nbsp;{who.upper()}")
+            label.setTextFormat(Qt.RichText)
+        else:
+            label = QLabel(who.upper())
         label.setStyleSheet(f"color: {theme.NEUTRAL[500]}; font-size: 10.5px;"
                             " font-weight: 700; letter-spacing: 1px;"
                             " border: none; background: transparent;")
@@ -1150,8 +1220,7 @@ class _Turn(QFrame):
         for caption, target in ((i18n.t("Open"), path),
                                 (i18n.t("Show"), os.path.dirname(path))):
             lk = Link(caption)
-            lk.clicked.connect(lambda t=target: QDesktopServices.openUrl(
-                QUrl.fromLocalFile(t)))
+            lk.clicked.connect(lambda t=target: paths.open_file(t))
             lay.addWidget(lk)
         return row
 
@@ -1333,7 +1402,7 @@ class Composer(QFrame):
         lay.setSpacing(6)
         self.edit = QPlainTextEdit()
         self.edit.setPlaceholderText(i18n.t(
-            "Follow up — ask something more, or say what to change…"))
+            "Ask a follow-up question…"))
         self.edit.setFixedHeight(62)
         lay.addWidget(self.edit)
         row = QHBoxLayout()
@@ -1343,12 +1412,15 @@ class Composer(QFrame):
             self.agent.addItem(label, key)
         row.addWidget(self.agent)
         row.addStretch(1)
-        self.build_btn = C.button(i18n.t("Build this"), "secondary", small=True,
+        # One verb per situation. "Ask" always; "Make a change" only while the
+        # person is changing the model (see set_mode).
+        self.build_btn = C.button(i18n.t("Make a change"), "secondary", small=True,
                                   on_click=self.build.emit)
         self.build_btn.setToolTip(i18n.t(
             "Turn the answer above into an exact change plan, then build it."))
+        self.build_btn.hide()
         row.addWidget(self.build_btn)
-        self.send_btn = C.button(i18n.t("Send"), "primary", small=True,
+        self.send_btn = C.button(i18n.t("Ask"), "primary", small=True,
                                  on_click=self._send)
         row.addWidget(self.send_btn)
         lay.addLayout(row)
@@ -1369,6 +1441,14 @@ class Composer(QFrame):
             w.setEnabled(not busy)
         self.note.setText(note)
         self.note.setVisible(busy and bool(note))
+
+    def set_mode(self, changing: bool):
+        """Ask: just "Ask". Changing the model: "Ask" for a question about the
+        answer and "Make a change" to plan and build from it."""
+        self.build_btn.setVisible(changing)
+        self.edit.setPlaceholderText(i18n.t(
+            "Ask a follow-up, or describe what to change and press Make a change…")
+            if changing else i18n.t("Ask a follow-up question…"))
 
     def clear(self):
         self.edit.clear()

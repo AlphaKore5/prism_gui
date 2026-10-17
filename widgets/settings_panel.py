@@ -44,7 +44,7 @@ import platform
 import sys
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QSize, QUrl, Signal
+from PySide6.QtCore import QSize, QTimer, QUrl, Qt, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout,
@@ -573,10 +573,56 @@ class SettingsPanel(QDialog):
         would interrupt the next field they're about to edit), then rebuild
         the page so every section reads back what was just written."""
         CB.config.save(self.cfg)
+        # Settings is a modal over the window, so the window's status bar —
+        # where this used to speak — is hidden behind it: a Save looked like
+        # nothing happened. Say it here, inside the dialog.
+        self.show_toast(message)
         window = self.window()
-        if hasattr(window, "statusBar"):
+        if window is not self and hasattr(window, "statusBar"):
             window.statusBar().showMessage(message, 3000)
         self.refresh()
+
+    # ── a confirmation you can actually see ────────────────────────────────
+    def show_toast(self, text: str, tone: str = "ok", ms: int = 3500):
+        """A pill at the foot of the dialog: green for done, amber for a
+        warning, red for a failure. Lives on the dialog, so refresh() (which
+        rebuilds the page) does not take it away."""
+        if getattr(self, "_toast", None) is None:
+            self._toast = QLabel(self)
+            self._toast.setAlignment(Qt.AlignCenter)
+            self._toast.setWordWrap(True)
+            self._toast.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self._toast_timer = QTimer(self)
+            self._toast_timer.setSingleShot(True)
+            self._toast_timer.timeout.connect(self._toast.hide)
+        bg, ink, edge = {
+            "ok": (theme.OK_BG, theme.OK_INK, theme.OK),
+            "warn": (theme.WARN_BG, theme.WARN_INK, theme.WARN),
+            "err": (theme.ERR_BG, theme.ERR_INK, theme.ERR),
+        }.get(tone, (theme.OK_BG, theme.OK_INK, theme.OK))
+        mark = {"ok": "✓", "warn": "!", "err": "✕"}.get(tone, "✓")
+        self._toast.setStyleSheet(
+            f"background: #ffffff; color: {ink}; border: 1.5px solid {edge};"
+            " border-radius: 12px; padding: 10px 18px; font-size: 13.5px;"
+            " font-weight: 600;")
+        self._toast.setText(f"{mark}  {text}")
+        self._place_toast()
+        self._toast.show()
+        self._toast.raise_()
+        self._toast_timer.start(ms)
+
+    def _place_toast(self):
+        t = getattr(self, "_toast", None)
+        if t is None:
+            return
+        width = min(max(self.width() - 80, 240), 560)
+        t.setFixedWidth(width)
+        t.adjustSize()
+        t.move((self.width() - t.width()) // 2, self.height() - t.height() - 22)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._place_toast()
 
     def _danger(self, title: str, blurb: str, buttons) -> Card:
         """The quarantine. Everything irreversible lives in one red-bordered
@@ -1156,6 +1202,28 @@ class SettingsPanel(QDialog):
             return
         self.cfg["api_key"] = key
         self._after_save(i18n.t("Saved."))
+        if key:
+            self._check_groq_key(key)
+
+    def _check_groq_key(self, key: str):
+        """Saved — now find out whether Groq accepts it, and say so."""
+        from workers import GroqKeyWorker
+        self.show_toast(i18n.t("Saved — checking the key with Groq…"), "warn", 15000)
+        worker = GroqKeyWorker(key, self.cfg.get("model", ""))
+
+        def finished(why: str, key=key):
+            if self.cfg.get("api_key") != key:
+                return                       # replaced since — not this one's news
+            if not why:
+                self.show_toast(i18n.t("Saved — Groq accepts this key."), "ok")
+            elif why.startswith("The key is valid") or why.startswith("The key works"):
+                self.show_toast(why, "warn", 8000)
+            else:
+                self.show_toast(i18n.t("Saved, but ") + why[0].lower() + why[1:],
+                                "err", 12000)
+        worker.done.connect(finished)
+        self._key_worker = worker
+        worker.start()
 
     def _save_agents(self, picker: AgentsPicker, boxes: dict):
         agents = picker.current_agents()

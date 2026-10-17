@@ -235,7 +235,9 @@ def chat_turns(session: dict) -> list:
         on = first.get("file", "")
         stem = os.path.splitext(on)[0]
         answers = (rec.get("responses") or {}).get(f"ask · {stem}") or []
+        agents = info.get("agents") or {}
         turns.append({
+            "agent": agents.get(f"ask · {stem}", ""),
             "path": item.get("path", ""),
             "stamp": item.get("stamp", 0),
             "when": _when(item.get("stamp", 0)),
@@ -256,11 +258,12 @@ def chat_turns(session: dict) -> list:
 
 
 def live_turn(action: str, file: str, question: str, answer: str = "",
-              built: list | None = None, followups: list | None = None) -> dict:
+              built: list | None = None, followups: list | None = None,
+              agent: str = "") -> dict:
     """A turn for a run still in progress — shown in the chat before the run
     is saved, so what you just asked never waits for the end to appear."""
     now = time.time()
-    return {"path": "", "stamp": now, "when": _when(now), "day": _day(now),
+    return {"agent": agent, "path": "", "stamp": now, "when": _when(now), "day": _day(now),
             "time": _time(now), "action": action.capitalize(), "file": file,
             "edited": bool(_MODIFIED.search(os.path.splitext(file)[0])),
             "question": question, "answer": answer, "built": list(built or []),

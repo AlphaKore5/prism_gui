@@ -667,6 +667,23 @@ class MotionWorker(_Worker):
 
 # ── Email inquiry automation ──────────────────────────────────────────────────────────
 
+class GroqKeyWorker(_Worker):
+    """Ask Groq whether a key works, off the UI thread, at the moment it is
+    saved — so a wrong key is told apart from a right one on the spot instead
+    of failing the first real task."""
+    done = Signal(str)       # "" == the key works, else why not
+
+    def __init__(self, api_key: str, model: str = ""):
+        super().__init__()
+        self.api_key, self.model = api_key, model
+
+    def run(self):
+        try:
+            self.done.emit(CB.router.verify_key(self.api_key, self.model))
+        except Exception as e:                          # noqa: BLE001
+            self.done.emit(str(e))
+
+
 class InboxVerifyWorker(_Worker):
     """Find the mail server and check the password, off the UI thread.
 

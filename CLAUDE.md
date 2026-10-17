@@ -40,3 +40,26 @@ Landing work:
 
 Testing traps: never call `processEvents()`, `exec()` or a `QEventLoop`
 in a test; never write to the real `~/.prism` (conftest fails the run).
+
+## Never do (each one cost the owner real data or trust)
+
+- **Never let a test, script or harness reach the real `~/.prism`.** On
+  2026-10-17 a STEP test that called `config.save()` overwrote the owner's real
+  `config.json` — Groq key, agent choices, Email-inquiry settings — with its
+  fixture (`api_key: "k"`). Nothing flagged it; the next launch said "Groq
+  rejected your API key" and there was no backup. Rules that follow:
+  - Any script that starts Prism or a dialog runs with `HOME` pointed at a
+    sandbox (`make_sandbox.py`); never at the real home, never "just once".
+  - A test that can reach `config.save`, `save_run` or `save_artifact` must
+    patch it or use the temp `CONFIG_PATH` the conftest provides. When you change
+    a guard or a code path that decides whether `_generate`/`save` is reached,
+    re-read the tests that exercise it before running them.
+  - Before running anything that might write, copy `~/.prism/config.json` aside
+    and compare it after. The suite now fails if the real config's hash changes.
+  - Never delete a sandbox that was copied from the real config until the real
+    one is known good: it may be the only backup.
+- **Never run `pkill -f` / `pgrep -f` with a pattern that appears in your own
+  command line** — it kills your own shell (use a PID or `[x]yz` on a string not
+  typed in the same command).
+- **Never push, tag or release without the owner's explicit OK in that message**
+  (see Landing work above).

@@ -103,6 +103,33 @@ class StepAskWorker(_Worker):
             self.failed.emit(str(e))
 
 
+class StepPlanWorker(_Worker):
+    """One Groq call that turns an answer into an exact change plan (JSON) —
+    the same step a reasoning tool does in the browser, kept in-house when
+    Groq is the tool the person picked, so choosing Groq never opens a
+    browser."""
+    done = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, cfg: dict, report: dict, question: str,
+                 suggestions: str):
+        super().__init__()
+        self.cfg, self.report = cfg, report
+        self.question, self.suggestions = question, suggestions
+
+    def run(self):
+        try:
+            SF = CB.get_stepfile()
+            text = CB.router.groq_chat(
+                self.cfg.get("api_key", ""),
+                self.cfg.get("model", "llama-3.3-70b-versatile"),
+                SF.plan_prompt(self.report, self.question, self.suggestions),
+                temperature=0.2, timeout=60).strip()
+            self.done.emit(text)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class StepApplyWorker(_Worker):
     """Apply a validated plan to a COPY of the model, re-measure the copy,
     and rewrite the review page with the real After column. The original

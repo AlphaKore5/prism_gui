@@ -117,6 +117,14 @@ def _real_home_files() -> dict[str, str]:
                 .encode("utf-8")).hexdigest()
         except (OSError, ValueError):
             out["licence"] = "unreadable"
+    config = os.path.join(home, "config.json")
+    if os.path.exists(config):
+        # The Groq key, agent choices and mail settings live here. 2026-10-17:
+        # a STEP test that reached config.save() overwrote them with its own
+        # fixture (key "k") — nothing noticed, the next launch just said
+        # "Groq rejected your API key".
+        with open(config, "rb") as f:
+            out["config"] = hashlib.sha256(f.read()).hexdigest()
     runs = os.path.join(home, "runs")
     if os.path.isdir(runs):
         out["runs/"] = ",".join(sorted(n for n in os.listdir(runs)
@@ -190,6 +198,9 @@ def _the_suite_must_not_touch_the_real_home():
         else:
             lost.append("the real ~/.prism/license.json had its identity "
                         "rewritten (one of " + ", ".join(_LICENCE_FIELDS) + ")")
+    if before.get("config") != after.get("config"):
+        lost.append("the real ~/.prism/config.json was rewritten — a test "
+                    "reached config.save() without isolating CONFIG_PATH")
     if before.get("runs/") != after.get("runs/"):
         was = set(filter(None, (before.get("runs/") or "").split(",")))
         now = set(filter(None, (after.get("runs/") or "").split(",")))
@@ -206,6 +217,24 @@ def _the_suite_must_not_touch_the_real_home():
               "cfg['runs_dir'] does NOT isolate dashboard_data._run_files, and "
               "that a licensing daemon thread outliving its patch will write "
               "wherever user_dir() points when it finishes.")
+
+
+@pytest.fixture(autouse=True)
+def _config_is_never_the_real_one(tmp_path_factory, monkeypatch):
+    """Every test saves its config into a throwaway file. `config.save()` is
+    called from many dialogs (Generate, Settings, set-up…); a test that did not
+    patch it wrote its fixture over the developer's real config.json — their
+    Groq key, agent map and mail settings."""
+    try:
+        import core_bridge  # noqa: F401  (puts the engine on sys.path)
+        from core import config
+    except Exception:                                   # noqa: BLE001
+        yield
+        return
+    monkeypatch.setattr(
+        config, "CONFIG_PATH",
+        str(tmp_path_factory.mktemp("cfg") / "config.json"))
+    yield
 
 
 @pytest.fixture(autouse=True)

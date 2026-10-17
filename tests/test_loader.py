@@ -174,3 +174,53 @@ class TheMailCheckTellsTheScreenHowFarItIs(unittest.TestCase):
             worker.run()
         self.assertEqual(got, [("file", 3, 75)])
         self.assertEqual(done, ["result"])
+
+
+class TheTestsCannotTouchTheRealConfig(unittest.TestCase):
+    def test_saving_a_config_in_a_test_lands_in_a_temp_file(self):
+        import core_bridge  # noqa: F401
+        from core import config
+        real = os.path.join(os.path.expanduser("~"), ".prism", "config.json")
+        self.assertNotEqual(os.path.abspath(config.CONFIG_PATH), os.path.abspath(real))
+
+
+class SavingASettingIsSeen(unittest.TestCase):
+    """2026-10-17: Settings is a modal over the window, so the status-bar
+    "Saved." was hidden behind it — a Save looked like nothing happened."""
+
+    def _panel(self):
+        from unittest import mock
+        from widgets.settings_panel import SettingsPanel
+        with mock.patch("widgets.settings_panel.CB.config.save"):
+            return SettingsPanel({"api_key": ""}), mock
+
+    def test_a_save_shows_a_toast_inside_the_dialog(self):
+        panel, mock = self._panel()
+        panel.show()
+        with mock.patch("widgets.settings_panel.CB.config.save"):
+            panel._after_save("Saved.")
+        self.assertTrue(panel._toast.isVisible())
+        self.assertIn("Saved.", panel._toast.text())
+
+    def test_a_key_is_checked_with_groq_and_the_answer_is_shown(self):
+        panel, mock = self._panel()
+        panel.show()
+        key = "gsk_" + "x" * 30
+        field = mock.MagicMock()
+        field.text.return_value = key
+        with mock.patch("widgets.settings_panel.CB.config.save"), \
+                mock.patch("workers.GroqKeyWorker") as worker:
+            panel._save_key(field)
+        worker.assert_called_once()
+        done = worker.return_value.done.connect.call_args[0][0]
+        done("")
+        self.assertIn("accepts", panel._toast.text())
+        done("Groq rejected this key. Make a new one…")
+        self.assertIn("Saved, but groq rejected", panel._toast.text())
+
+    def test_the_default_dashboard_is_plain_white(self):
+        from unittest import mock
+        import main_window
+        with mock.patch.object(main_window.CB.config, "load", return_value={}):
+            central = main_window.DashboardCentral()
+        self.assertIsNone(central._bg_orig)

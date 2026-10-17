@@ -52,11 +52,22 @@ def _linux_id() -> str:
 
 
 def _macos_id() -> str:
-    try:
-        out = subprocess.run(
-            ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
-            capture_output=True, text=True, timeout=10).stdout
-    except (OSError, subprocess.SubprocessError):
+    # The absolute path first: a Prism relaunched by the update helper, or
+    # started by launchd, may have a PATH without /usr/sbin, and a machine id
+    # that fails to read here falls through to the MAC-address tier — a
+    # different fingerprint, so the saved licence no longer matches this
+    # "device".
+    out = ""
+    for exe in ("/usr/sbin/ioreg", "ioreg"):
+        try:
+            out = subprocess.run(
+                [exe, "-rd1", "-c", "IOPlatformExpertDevice"],
+                capture_output=True, text=True, timeout=10).stdout
+            if out:
+                break
+        except (OSError, subprocess.SubprocessError):
+            continue
+    if not out:
         return ""
     for line in out.splitlines():
         if "IOPlatformUUID" in line:

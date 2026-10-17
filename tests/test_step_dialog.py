@@ -178,9 +178,9 @@ class TheDoorIsShutUntilAModelIsAttached(unittest.TestCase):
         dlg = _dialog()
         self.assertEqual(dlg.generate_btn.text(), "Measure and Draw")
         dlg._action_buttons["ask"].setChecked(True)
-        self.assertEqual(dlg.generate_btn.text(), "Get the Answer")
+        self.assertEqual(dlg.generate_btn.text(), "Ask")
         dlg._action_buttons["edit"].setChecked(True)
-        self.assertEqual(dlg.generate_btn.text(), "Make the Changes")
+        self.assertEqual(dlg.generate_btn.text(), "Make a change")
         dlg._action_buttons["draft"].setChecked(True)
         self.assertEqual(dlg.generate_btn.text(), "Measure and Draw")
 
@@ -345,7 +345,7 @@ class AnAgentOnlyEverSeesTheNumbersAndPrismsOwnRender(unittest.TestCase):
         dlg._current = m
         dlg._action_buttons["edit"].setChecked(True)
         with mock.patch.object(SD, "AutomationWorker", _CaptureWorker):
-            dlg._on_suggested("1) thin the wall")
+            dlg._on_suggested("1) thin the wall", agent="Claude")
         # The answer is in the chat at once — no window opened for it.
         self.assertEqual(dlg._live["answer"], "1) thin the wall")
         self.assertIs(dlg.chat_stack.currentWidget(), dlg.chat)
@@ -673,9 +673,12 @@ class AFollowUpTypedInsideTheAnswerPopup(unittest.TestCase):
         key = f"ask · {m['report']['stem']}"
         dlg._responses[key] = ["PP for cost."]
         fake_dlg = mock.MagicMock()
+        dlg._stage_agents_map[key] = "Claude"
         dlg._on_answer_followup_done(fake_dlg, key, "Nylon 6 needs drying.")
-        self.assertEqual(dlg._responses[key], ["Nylon 6 needs drying."])
-        self.assertEqual(dlg._stage_agents_map[key], "Groq")
+        # The follow-up is delivered to the chat; the FIRST answer, and who
+        # gave it, are exactly as they were.
+        self.assertEqual(dlg._responses[key], ["PP for cost."])
+        self.assertEqual(dlg._stage_agents_map[key], "Claude")
         fake_dlg.set_busy.assert_called_once_with(False)
         fake_dlg.set_answer.assert_called_once_with(
             "Nylon 6 needs drying.", "Groq")
@@ -731,12 +734,13 @@ class AFollowUpTypedInsideTheAnswerPopup(unittest.TestCase):
         key = f"ask · {m['report']['stem']}"
         dlg._responses[key] = ["PP for cost."]
         dlg._stage_agents_map[key] = "Claude"
+        dlg._links[key] = "https://claude.ai/chat/abc"
         fake_dlg = mock.MagicMock()
         dlg._on_answer_followup_agent_done(
             fake_dlg, key, "Claude", {"ask": ["Nylon 6 needs drying."]},
             {"ask": "https://claude.ai/chat/def"})
-        self.assertEqual(dlg._responses[key], ["Nylon 6 needs drying."])
-        self.assertEqual(dlg._links[key], "https://claude.ai/chat/def")
+        self.assertEqual(dlg._responses[key], ["PP for cost."])   # first answer kept
+        self.assertEqual(dlg._links[key], "https://claude.ai/chat/abc")   # and its chat
         self.assertEqual(dlg._stage_agents_map[key], "Claude")
         fake_dlg.set_answer.assert_called_once_with(
             "Nylon 6 needs drying.", "Claude")
@@ -778,7 +782,14 @@ class BuildThisWorksFromAnyFollowUpEvenReopenedOnes(unittest.TestCase):
             dlg._action_buttons["ask"].setChecked(True)
             dlg._on_suggested("a")
         self.assertTrue(dlg.composer.isVisibleTo(dlg))
+        # Ask: the box and "Ask" only — nothing that talks about building.
+        self.assertTrue(dlg.composer.send_btn.isVisibleTo(dlg.composer))
+        self.assertEqual(dlg.composer.send_btn.text(), "Ask")
+        self.assertFalse(dlg.composer.build_btn.isVisibleTo(dlg.composer))
+        # Edit: "Make a change" joins it.
+        dlg._action_buttons["edit"].setChecked(True)
         self.assertTrue(dlg.composer.build_btn.isVisibleTo(dlg.composer))
+        self.assertEqual(dlg.composer.build_btn.text(), "Make a change")
     def test_clicking_build_this_does_not_close_the_popup(self):
         dlg = AnswerDialog("t", "s", "q", "a", "Groq", allow_build=True)
         seen = []
@@ -874,7 +885,7 @@ class BuildThisWorksFromAnyFollowUpEvenReopenedOnes(unittest.TestCase):
         dlg.ask.set_text("fit 6mm")
         dlg._action_buttons["edit"].setChecked(True)
         with mock.patch.object(SD, "AutomationWorker", _CaptureWorker):
-            dlg._on_suggested("enlarge the hole")
+            dlg._on_suggested("enlarge the hole", agent="Claude")
         stage_key, _tool, _prompts = _CaptureWorker.seen["kwargs"]["custom_stages"][0]
         self.assertEqual(stage_key, "plan")
         with mock.patch.object(CB.config, "save_run") as saved:
@@ -898,6 +909,138 @@ class BuildThisWorksFromAnyFollowUpEvenReopenedOnes(unittest.TestCase):
         self.assertEqual(stage_key, "plan")
         saved.assert_not_called()
         self.assertFalse(dlg.composer.send_btn.isEnabled())   # busy
+
+class AskAndEditAreTwoThingsAndEachSaysWhoAnswered(unittest.TestCase):
+    """Reported 2026-10-17: a follow-up overwrote the first answer so two
+    questions showed one answer; choosing Groq still opened ChatGPT and a
+    plan; "Build this" sat under a plain question; and nothing said which AI
+    had answered."""
+
+    def _asked(self, agent="Groq"):
+        dlg = _dialog()
+        m = _fake_measured(dlg)
+        dlg._current = m
+        dlg.ask.set_text("which material fits best?")
+        dlg._action_buttons["ask"].setChecked(True)
+        # Unsaved (as in the earlier Ask tests), so the live card stays on screen.
+        with mock.patch.object(CB.config, "save_run", side_effect=OSError):
+            dlg._on_suggested("PP for cost.", agent=agent)
+        return dlg, m, f"ask · {m['report']['stem']}"
+
+    def test_a_follow_up_leaves_the_first_answer_alone(self):
+        dlg, m, key = self._asked("Claude")
+        dlg._inline.question = "what about nylon?"
+        with mock.patch.object(CB.config, "save_run", side_effect=OSError):
+            dlg._on_answer_followup_done(dlg._inline, key, "Nylon needs drying.")
+        self.assertEqual(dlg._responses[key], ["PP for cost."])
+        self.assertEqual(dlg._stage_agents_map[key], "Claude")
+        self.assertEqual(dlg._followups, [
+            {"q": "what about nylon?", "a": "Nylon needs drying.", "agent": "Groq"}])
+        turn = dlg.chat.cards[0].turn
+        self.assertEqual(turn["answer"], "PP for cost.")
+        self.assertEqual(turn["followups"][0]["a"], "Nylon needs drying.")
+
+    def test_two_follow_ups_keep_all_three_answers_apart(self):
+        dlg, m, key = self._asked()
+        with mock.patch.object(CB.config, "save_run"):
+            for q, a in (("and nylon?", "Dry it."), ("and PET?", "Fine.")):
+                dlg._inline.question = q
+                dlg._on_answer_followup_done(dlg._inline, key, a)
+        self.assertEqual([f["a"] for f in dlg._followups], ["Dry it.", "Fine."])
+        self.assertEqual(dlg._responses[key], ["PP for cost."])
+
+    def test_a_follow_up_is_given_the_whole_conversation_so_far(self):
+        dlg, m, key = self._asked()
+        dlg._followups = [{"q": "and nylon?", "a": "Dry it.", "agent": "Groq"}]
+        with mock.patch.object(SD, "StepAskWorker") as worker_cls:
+            dlg._on_answer_followup(mock.MagicMock(), m, key, "Groq", "and PET?")
+        prompt = worker_cls.call_args[0][2]
+        for part in ("which material fits best?", "PP for cost.",
+                     "and nylon?", "Dry it.", "and PET?"):
+            self.assertIn(part, prompt)
+
+    def test_the_answer_names_who_gave_it_and_it_survives_a_reopen(self):
+        dlg, m, key = self._asked("Claude")
+        self.assertEqual(dlg._live["agent"], "Claude")
+        dlg.models = [m]
+        record = dlg._run_record("ask")
+        self.assertEqual(record["step"]["agents"][key], "Claude")
+        sess = SES.build_sessions([{"path": "/r/1.json", "stamp": 1, "rec": {
+            "step": record["step"], "responses": record["responses"]}}])[0]
+        self.assertEqual(SES.chat_turns(sess)[0]["agent"], "Claude")
+        fresh = _dialog()
+        fresh._apply_record("", rec=record)
+        self.assertEqual(fresh._stage_agents_map[key], "Claude")
+
+    def test_the_card_labels_the_answer_with_its_agent(self):
+        dlg, m, key = self._asked("ChatGPT")
+        from PySide6.QtWidgets import QLabel
+        card = dlg.chat.cards[0]
+        texts = [l.text() for l in card.findChildren(QLabel)]
+        self.assertTrue(any("CHATGPT" in t for t in texts), texts)
+
+    def test_ask_offers_only_ask_and_edit_adds_make_a_change(self):
+        dlg, m, key = self._asked()
+        m["path"] = "/nowhere/block.step"
+        dlg._sync_composer()
+        self.assertFalse(dlg.composer.build_btn.isVisibleTo(dlg.composer))
+        dlg._action_buttons["edit"].setChecked(True)
+        self.assertTrue(dlg.composer.build_btn.isVisibleTo(dlg.composer))
+
+    def test_edit_answered_by_groq_is_planned_by_groq_with_no_browser(self):
+        dlg = _dialog()
+        m = _fake_measured(dlg)
+        dlg._current = m
+        dlg.ask.set_text("enlarge the hole to 6 mm")
+        dlg._action_buttons["edit"].setChecked(True)
+        _CaptureWorker.seen = {}
+        with mock.patch.object(SD, "AutomationWorker", _CaptureWorker), \
+                mock.patch.object(SD, "StepPlanWorker") as planner, \
+                mock.patch.object(CB.config, "save_run"):
+            dlg._on_suggested("Enlarge it.", agent="Groq")
+        self.assertEqual(_CaptureWorker.seen, {}, "no browser tool may open")
+        planner.assert_called_once()
+        self.assertIn("enlarge the hole to 6 mm", planner.call_args[0][2])
+        planner.return_value.start.assert_called_once()
+
+    def test_the_plan_names_who_wrote_it(self):
+        dlg = _dialog()
+        m = _fake_measured(dlg)
+        dlg._current = m
+        dlg.ask.set_text("enlarge the hole")
+        dlg._action_buttons["edit"].setChecked(True)
+        plan = ('{"changes": [{"op": "enlarge_hole", "part": "block", '
+                '"dia_mm": 5, "new_dia_mm": 6, "why": "fit"}], "advice": []}')
+        with mock.patch.object(CB.config, "save_run"):
+            dlg._on_planned({"plan": [plan]}, {}, agent="Groq")
+        from PySide6.QtWidgets import QLabel
+        texts = " ".join(l.text() for l in dlg.plan_panel.findChildren(QLabel))
+        self.assertIn("Planned by", texts)
+        self.assertIn("Groq", texts)
+
+    def test_a_question_asked_in_edit_stays_on_the_answer_not_the_plan(self):
+        dlg = _dialog()
+        m = _fake_measured(dlg)
+        dlg._current = m
+        dlg.ask.set_text("what material is this?")
+        dlg._action_buttons["edit"].setChecked(True)
+        dlg._show_tab(1)
+        with mock.patch.object(CB.config, "save_run"):
+            dlg._on_planned({"plan": ['{"changes": [], "advice": ["It is a question."]}']},
+                            {}, agent="Groq")
+        self.assertEqual(dlg.out_tabs.current(), 1)
+        self.assertIn("question", dlg.status.text())
+
+    def test_making_a_change_after_follow_ups_plans_from_the_whole_conversation(self):
+        dlg, m, key = self._asked()
+        m["path"] = "/nowhere/block.step"
+        dlg._followups = [{"q": "make the hole 6 mm", "a": "Yes, 6 mm.", "agent": "Groq"}]
+        with mock.patch.object(SD, "StepPlanWorker") as planner:
+            dlg._composer_build()
+        suggestions = planner.call_args[0][3]
+        self.assertIn("PP for cost.", suggestions)
+        self.assertIn("make the hole 6 mm", suggestions)
+
 
 class TheGuardsSpeakBeforeAnythingRuns(unittest.TestCase):
     """Real QMessageBox.warning calls, patched so a headless run does not
@@ -933,6 +1076,9 @@ class TheGuardsSpeakBeforeAnythingRuns(unittest.TestCase):
         dlg._on_files_added(["/nowhere/a.step"])
         dlg.ask.set_text("fit 6mm")
         dlg._action_buttons["edit"].setChecked(True)
+        # Groq plans in-house and needs no reasoning tool; picking ChatGPT or
+        # Claude does, so that is where the guard speaks.
+        dlg.model_combo.setCurrentIndex(dlg.model_combo.findData("ChatGPT"))
         with mock.patch.object(SD.QMessageBox, "warning") as warn, \
                 mock.patch.object(SD, "StepMeasureWorker") as worker:
             dlg._generate()

@@ -88,18 +88,30 @@ def read_json(target: str, default: dict[str, Any]) -> dict[str, Any]:
     those) does not change what gets returned; it only leaves a trail for the
     one case worth diagnosing.
     """
-    try:
-        with open(target, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, dict):
-            _log_read_failure(target, "content is valid JSON but not an object")
+    last_error = ""
+    # A few tries, not one. On Windows a read that lands in the instant the
+    # file is being replaced (the renewal thread's os.replace), or while an
+    # antivirus scan or sync client holds it, raises PermissionError — and one
+    # failed read here used to mean "no licence": the activation screen, for a
+    # customer who had activated long ago. It shows up right after an update,
+    # when the first launch renews the token while Defender is still scanning
+    # the new files. 3 tries, 100 ms apart, cost nothing on the normal path.
+    for attempt in range(3):
+        try:
+            with open(target, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                _log_read_failure(target, "content is valid JSON but not an object")
+                return dict(default)
+            return {**default, **data}
+        except FileNotFoundError:
             return dict(default)
-        return {**default, **data}
-    except FileNotFoundError:
-        return dict(default)
-    except (OSError, ValueError) as e:
-        _log_read_failure(target, str(e))
-        return dict(default)
+        except (OSError, ValueError) as e:
+            last_error = str(e)
+            if attempt < 2:
+                time.sleep(0.1)
+    _log_read_failure(target, last_error)
+    return dict(default)
 
 
 def _log_read_failure(target: str, reason: str) -> None:

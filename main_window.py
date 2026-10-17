@@ -218,12 +218,11 @@ class DashboardCentral(QWidget):
             # A non-empty value that exists on disk is a bundled or user wallpaper.
             if custom_bg and os.path.exists(custom_bg):
                 bg_path = custom_bg
-            elif custom_bg is None:
-                # Fresh install — use the built-in default background.
-                bg_path = paths.resource("assets", "dashboard-bg.jpg")
-            # custom_bg == "" → white; bg_path stays None
+            # Nothing chosen yet (None) or "" → the default: a plain white
+            # screen, no picture and no logo. A wallpaper is only ever
+            # something the person picked in Settings → Appearance.
         except Exception:
-            bg_path = paths.resource("assets", "dashboard-bg.jpg")
+            bg_path = None
         self._bg_orig = QPixmap(bg_path) if bg_path and os.path.exists(bg_path) else None
         self._cached_pixmap = None
         self._cached_blurred = None
@@ -280,7 +279,7 @@ class DashboardCentral(QWidget):
             grad.setColorAt(1.0, QColor(255, 255, 255, 30))
             painter.fillRect(self.rect(), grad)
         else:
-            painter.fillRect(self.rect(), QColor("#f0f2f7"))  # soft light default
+            painter.fillRect(self.rect(), QColor("#ffffff"))  # the default: plain white
 
     def set_background(self, path: str):
         if path and os.path.exists(path):
@@ -290,9 +289,8 @@ class DashboardCentral(QWidget):
             # Empty string = user chose pure-white default
             self._bg_orig = None
         else:
-            # Fallback for unknown path
-            bg_path = paths.resource("assets", "dashboard-bg.jpg")
-            self._bg_orig = QPixmap(bg_path) if os.path.exists(bg_path) else None
+            # A path that is gone: plain white, never a picture nobody chose.
+            self._bg_orig = None
         self._cached_pixmap = None
         self._cached_blurred = None
         self._cached_size = None
@@ -642,6 +640,12 @@ class MainWindow(QMainWindow):
             self.inquiry_work_panel.on_leave()
             self.cfg = CB.config.load()
             self.inquiry_panel.cfg = self.cfg
+        # The STEP screen was built with whatever cfg existed on its first
+        # visit; this window's cfg is replaced when it is re-read (after the
+        # Email inquiries screen, after Setup). A STEP holding the old one would
+        # use an old Groq key — and save it back over the new one.
+        if getattr(self, "step_work", None) is not None:
+            self.step_work.cfg = self.cfg
         index = SCREEN_INDEX.get(name, HOME)
         self.screens.setCurrentIndex(index)
         # Re-read on arrival. Both screens are reports over stores that other

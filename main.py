@@ -516,6 +516,28 @@ def _paywall(feature: str, parent, state) -> None:
         LicenseDialog(parent, mode="change").exec()
 
 
+def _log_gate(state) -> None:
+    """Leave a trail when the licence screen is about to appear: why, and
+    whether license.json is there at all. "Prism asks for my key again" is
+    otherwise impossible to diagnose after the fact."""
+    try:
+        import licensing
+        if state.status not in (licensing.NONE, licensing.TAMPERED):
+            return
+        import diagnostics
+        from licensing import store
+        target = store.path(paths.user_dir())
+        size = os.path.getsize(target) if os.path.exists(target) else -1
+        diagnostics.write(
+            "WARN",
+            f"licence screen will show: status={state.status} "
+            f"message={str(getattr(state, 'message', ''))[:200]!r} "
+            f"license.json={'missing' if size < 0 else str(size) + ' bytes'} "
+            f"version={app_meta.VERSION} frozen={paths.is_frozen()}")
+    except Exception:                                   # noqa: BLE001
+        pass
+
+
 def _licence_gate() -> bool:
     """Decide whether the app may open, before the window is built.
 
@@ -563,12 +585,21 @@ def _licence_gate() -> bool:
     if overridden:
         print(f"[prism] applied server config for {overridden} tool(s)")
 
+    # Read the licence BEFORE the renewal starts. The renewal rewrites
+    # license.json on its own thread, and a read that lands in the middle of
+    # that (on Windows, a file being replaced or scanned raises
+    # PermissionError) used to come back as "no licence" — the activation
+    # screen for someone who activated long ago, most often on the first
+    # launch after an update, when the renewal always writes. state() is
+    # cached, so nothing later in this launch re-reads it.
+    state = licensing.state()
+
     # Fire-and-forget: renews the token AND the authorisation lease in the
     # background. The window builds against the cached pair, so a slow
     # corporate DNS costs nothing at startup.
     licensing.refresh()
 
-    state = licensing.state()
+    _log_gate(state)
     if state.status == licensing.NONE:
         return LicenseDialog(mode="activate").exec() == QDialog.Accepted
     if state.status == licensing.TAMPERED:

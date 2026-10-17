@@ -42,11 +42,12 @@ from PySide6.QtWidgets import (
 import core_bridge as CB
 import dashboard_data as DATA
 import i18n
+import paths as appfiles
 import theme
 from dialogs.base import PrismDialog
 from workers import AutomationWorker
 from addons.step.workers import (StepApplyWorker, StepAskWorker,
-                                 StepMeasureWorker)
+                                 StepMeasureWorker, StepPlanWorker)
 from addons.step import sessions as SES
 from addons.step import workbench as WB
 from widgets.loader import Loader
@@ -82,8 +83,8 @@ ACTIONS_BY_KEY = {key: label for key, label, _blurb in ACTIONS}
 # separate radio choice they might not remember making.
 ACTION_BUTTON = {
     "draft": ("Measure and Draw", "grid"),
-    "ask": ("Get the Answer", "chat"),
-    "edit": ("Make the Changes", "pencil"),
+    "ask": ("Ask", "chat"),
+    "edit": ("Make a change", "pencil"),
 }
 
 # (cfg value, label) — who answers Ask/Edit's question. Groq is a direct,
@@ -462,7 +463,8 @@ class StepDialog(PrismDialog):
         model_host = QWidget()
         model_row = QHBoxLayout(model_host)
         model_row.setContentsMargins(0, 0, 0, 0)
-        model_row.addWidget(QLabel(i18n.t("Answer with:")))
+        self.model_label = QLabel(i18n.t("Answer with:"))
+        model_row.addWidget(self.model_label)
         self.model_combo = QComboBox()
         for key, label in MODEL_CHOICES:
             self.model_combo.addItem(i18n.t(label), key)
@@ -716,7 +718,11 @@ class StepDialog(PrismDialog):
         self.action_blurb.setText(i18n.t(ACTION_SHORT[action]))
         for w in self._ask_only:
             w.setVisible(action in ("ask", "edit"))
+        self.model_label.setText(i18n.t("Suggest the change with:")
+                                 if action == "edit" else i18n.t("Answer with:"))
         self.ai_draft_cb.setVisible(action == "draft")
+        if hasattr(self, "composer"):
+            self._sync_composer()
         lay = self.step2.layout()
         if lay is not None:
             lay.invalidate()
@@ -1096,8 +1102,10 @@ class StepDialog(PrismDialog):
                   and self._responses.get(key))
         self.composer.setVisible(ok)
         if ok:
-            self.composer.build_btn.setVisible(
-                bool(m.get("path")) or self._action() == "edit")
+            # Ask: the one button is "Ask". Only when the person is changing
+            # the model does a second one — "Make a change" — appear.
+            edit_mode = self._action() == "edit"
+            self.composer.set_mode(edit_mode and bool(m.get("path")))
             self.composer.set_agent(self._stage_agents_map.get(key)
                                     or self.cfg.get("step_ask_model", "Groq"))
 
@@ -1196,6 +1204,7 @@ class StepDialog(PrismDialog):
         self._run_path = path
         self._last_action = info.get("action") or ""
         self._followups = list(info.get("followups") or [])
+        self._stage_agents_map = dict(info.get("agents") or {})
         self._live, self._pending, self._awaiting = None, None, False
         action = info.get("action") if info.get("action") in ACTIONS_BY_KEY else "draft"
         self._action_buttons[action].setChecked(True)
@@ -1252,7 +1261,7 @@ class StepDialog(PrismDialog):
         if plan_texts:
             plan, _why = self.sf.parse_plan(plan_texts)
             if plan:
-                self.plan_panel.set_plan(plan)
+                self.plan_panel.set_plan(plan, self._stage_agents_map.get(f"plan · {stem}", ""))
                 self._tab_label(2, i18n.t("Plan"),
                                 len(plan["changes"]) + len(plan["advice"]))
         self.open_btn.setVisible(bool(self._links))
@@ -1639,7 +1648,8 @@ class StepDialog(PrismDialog):
                     "Groq needs your key — add it in Settings, or pick "
                     "ChatGPT or Claude above instead."))
                 return
-        if action == "edit" and not self._planner():
+        if (action == "edit" and self._chosen_model() != "Groq"
+                and not self._planner()):
             self._notify_error(i18n.t(
                 "Edit needs a reasoning tool to review the plan — open "
                 "Agents and pick one for Reasoning first."))
@@ -1659,6 +1669,7 @@ class StepDialog(PrismDialog):
             pass
         self.models = []
         self._responses, self._links, self._notes = {}, {}, []
+        self._stage_agents_map = {}
         self.meas_view.clear()
         self.result.clear()
         self._measure_lines = []
@@ -1976,7 +1987,7 @@ class StepDialog(PrismDialog):
             (i18n.t("You asked"), question), (agent, suggestions)]
         self._save_conversation(m, self._thread)
         self._live = SES.live_turn(self._action(), report["file"], question,
-                                   suggestions)
+                                   suggestions, agent=agent)
         self._show_live()
         self._show_tab(1)
         if not is_edit:
@@ -2028,6 +2039,44 @@ class StepDialog(PrismDialog):
             self._refresh_chat()
         self._show_tab(1)
 
+    def _conversation_text(self, key: str) -> str:
+        """The whole conversation so far — the question, the first answer and
+        every follow-up with who answered it — as plain text a tool can be
+        handed, so a later step sees all of it and not only the last reply."""
+        first = (self._responses.get(key) or [""])[0]
+        who = self._stage_agents_map.get(key) or i18n.t("the first answer")
+        parts = [f"Earlier question: {self.ask.text().strip()}",
+                 f"Answer ({who}):\n{first}"]
+        for f in self._followups:
+            parts += [f"Follow-up: {f.get('q', '')}",
+                      f"Answer ({f.get('agent') or '?'}):\n{f.get('a', '')}"]
+        return "\n\n".join(parts)
+
+    def _plan_via_groq(self, m: dict, key: str, popup, suggestions: str):
+        """Groq answered, so Groq plans: one in-house call, no browser."""
+        report = m["report"]
+        if not self.cfg.get("api_key"):
+            self._notify_error(i18n.t(
+                "Groq needs your key — add it in Settings, or pick "
+                "ChatGPT or Claude above instead."))
+            if popup is not None:
+                popup.set_busy(False)
+            return
+        if popup is not None:
+            popup.set_busy(True)
+        else:
+            self._set_busy(True, i18n.t(
+                "Groq is turning the answer into an exact change plan for "
+                "{file}…").replace("{file}", report["file"]), 1)
+        self._plan_worker = StepPlanWorker(
+            self.cfg, report, self.ask.text().strip(), suggestions)
+        self._plan_worker.done.connect(
+            lambda text, m=m, popup=popup: self._on_planned(
+                {"plan": [text]}, {}, m=m, popup=popup, agent="Groq"))
+        self._plan_worker.failed.connect(
+            lambda err, popup=popup: self._on_build_failed(err, popup))
+        self._plan_worker.start()
+
     def _build_plan_for(self, m: dict, key: str, popup):
         """Turn whatever is CURRENTLY saved at `key` into a plan, then (if
         confirmed) a build — the same pipeline a fresh Edit's own first
@@ -2035,7 +2084,11 @@ class StepDialog(PrismDialog):
         any follow-up too, including one on a conversation reopened long
         after the original build finished and its popup closed."""
         report = m["report"]
-        suggestions = self._responses[key][0]
+        suggestions = (self._conversation_text(key) if self._followups
+                       else self._responses[key][0])
+        if self._stage_agents_map.get(key) == "Groq":
+            self._plan_via_groq(m, key, popup, suggestions)
+            return
         if popup is not None:
             popup.set_busy(True)
         planner = self._planner()
@@ -2098,10 +2151,8 @@ class StepDialog(PrismDialog):
         dlg.set_busy(True)
         if agent == "Groq":
             composed = (
-                "(This is a follow-up to a question already answered "
-                f"above.) Earlier question: {self.ask.text().strip()}\n\n"
-                f"Your earlier answer:\n{self._responses[key][0]}\n\n"
-                f"Follow-up: {text}")
+                "(This is a follow-up to a conversation already under way.)\n\n"
+                f"{self._conversation_text(key)}\n\nNew follow-up: {text}")
             self._followup_ask_worker = StepAskWorker(
                 self.cfg, report, composed)
             self._followup_ask_worker.done.connect(
@@ -2122,10 +2173,9 @@ class StepDialog(PrismDialog):
         resume = ({"ask": self._links[key]}
                  if same_agent and self._links.get(key) else None)
         prompt = text if resume else (
-            "(This is a follow-up to a question a different tool already "
-            f"answered.) Earlier question: {self.ask.text().strip()}\n\n"
-            f"The earlier answer was:\n{self._responses[key][0]}\n\n"
-            f"Follow-up: {text}")
+            "(This is a follow-up to a conversation another tool already "
+            f"had.)\n\n{self._conversation_text(key)}\n\n"
+            f"New follow-up: {text}")
         self._followup_agent_worker = AutomationWorker(
             {}, self.cfg, [],
             f"STEP — follow-up with {agent} on {report['file']}",
@@ -2141,8 +2191,8 @@ class StepDialog(PrismDialog):
 
     def _on_answer_followup_done(self, dlg, key: str,
                                  answer: str):
-        self._responses[key] = [answer]
-        self._stage_agents_map[key] = "Groq"
+        # The first answer stays where it is (self._responses[key]); a
+        # follow-up is its own entry, kept with who gave it.
         dlg.set_busy(False)
         dlg.set_answer(answer, "Groq")
 
@@ -2155,10 +2205,8 @@ class StepDialog(PrismDialog):
                 dlg, i18n.t("{agent} didn't answer the follow-up.")
                 .replace("{agent}", agent))
             return
-        if links.get("ask"):
+        if links.get("ask") and not self._links.get(key):
             self._links[key] = links["ask"]
-        self._responses[key] = [texts[0]]
-        self._stage_agents_map[key] = agent
         dlg.set_busy(False)
         dlg.set_answer(texts[0], agent)
 
@@ -2167,7 +2215,7 @@ class StepDialog(PrismDialog):
         self._notify_error(error)
 
     def _on_planned(self, responses: dict, links: dict, m: dict = None,
-                    popup=None):
+                    popup=None, agent: str = ""):
         """The plan came back — in the Plan tab, not a window. With changes
         in it, a Build bar waits for you; nothing is built until you press it.
         With none, it says so and says what to do next.
@@ -2180,7 +2228,7 @@ class StepDialog(PrismDialog):
                             for k, v in links.items()})
         texts = [t for t in (responses.get("plan") or []) if t.strip()]
         self._responses[f"plan · {report['stem']}"] = texts
-        self._stage_agents_map[f"plan · {report['stem']}"] = self._planner()
+        self._stage_agents_map[f"plan · {report['stem']}"] = agent or self._planner()
         plan, why = self.sf.parse_plan(texts)
         if plan is None:
             self.status.setText(why)
@@ -2191,23 +2239,30 @@ class StepDialog(PrismDialog):
             self._next()
             return
         m["plan"] = plan
-        self.plan_panel.set_plan(plan)
+        self.plan_panel.set_plan(plan, agent or self._planner())
         self._tab_label(2, i18n.t("Plan"), len(plan["changes"]) + len(plan["advice"]))
         question = self.ask.text().strip()
         review = self.sf.review_html(report, plan, out_dir, question=question)
         self._review_path = review
         if popup is not None:
             popup.set_busy(False)
-        self._show_tab(2)
         if not plan["changes"]:
-            self._notes.append(f"{report['file']}: nothing Prism can apply by "
-                               "itself — see the Plan tab, then refine the request")
-            self.status.setText(i18n.t(
-                "Nothing to build yet — the Plan tab says why and what to do next."))
+            # Nothing to change — most often the question was a question.
+            # Stay on the answer; the Plan tab holds the explanation for
+            # anyone who wants it, but it does not take over the screen.
+            self._show_tab(1)
+            self._notes.append(f"{report['file']}: nothing to change — a "
+                               "question is answered with Ask")
+            note = i18n.t(
+                "Nothing was changed — that reads as a question. Use Ask for "
+                "questions, or say exactly what to change (which holes, what "
+                "size, or a scale).")
+            self.status.setText(note)
+            self.canvas.toast(note, [], seconds=12)
             if popup is None:
-                self._stay_on_plan = True      # keep the explanation in view
                 self._next()
             return
+        self._show_tab(2)
         # Something to build: wait for the person.
         self._pending = {"m": m, "plan": plan, "question": question,
                          "popup": popup, "out_dir": out_dir}
@@ -2263,7 +2318,7 @@ class StepDialog(PrismDialog):
 
     def _open_review_page(self):
         if self._review_path and os.path.exists(self._review_path):
-            QDesktopServices.openUrl(QUrl.fromLocalFile(self._review_path))
+            appfiles.open_file(self._review_path)
 
     def _on_applied(self, result: dict, m: dict = None, popup=None):
         m = m or self._current
@@ -2317,6 +2372,7 @@ class StepDialog(PrismDialog):
                 "question": question,
                 "chat": self._session_key,
                 "followups": list(self._followups),
+                "agents": dict(self._stage_agents_map),
                 "models": [{"file": m["report"]["file"],
                             "path": m.get("path", ""),
                             "report": self._storable(m["report"]),
@@ -2405,7 +2461,7 @@ class StepDialog(PrismDialog):
 
     def _open_folder(self):
         for m in self.models[:1]:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(m["out_dir"]))
+            appfiles.open_file(m["out_dir"])
 
     def _open_link(self):
         import webbrowser

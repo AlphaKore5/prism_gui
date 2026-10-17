@@ -149,6 +149,44 @@ def open_result(url: str) -> None:
         QUrl.fromLocalFile(url) if is_local_result(url) else QUrl(url))
 
 
+def open_file(path: str) -> bool:
+    """Open a file or folder in the machine's own default app — Preview or
+    Photos for a picture, Excel for a sheet, Finder or Explorer for a folder.
+
+    Each platform's own opener, not Qt's QDesktopServices: on a packaged Mac
+    and Windows build the Qt route returned without doing anything for local
+    files (a picture in STEP's Files tab did nothing on click), while `open`
+    and `os.startfile` are what the OS itself uses and are what Reel's Play
+    already relies on. Returns False if nothing could be started; falls back
+    to Qt as a last resort."""
+    if not isinstance(path, (str, bytes, os.PathLike)) or not path:
+        return False
+    path = os.path.normpath(str(path))
+    if not os.path.exists(path):
+        return False
+    import subprocess
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", path])
+        elif os.name == "nt":
+            os.startfile(path)  # noqa: F821  (Windows-only API)
+        else:
+            env = os.environ.copy()
+            # A parent editor's private library path must not reach the
+            # viewer (see scrub_environment below).
+            env.pop("LD_LIBRARY_PATH", None)
+            env.pop("LD_PRELOAD", None)
+            subprocess.Popen(["xdg-open", path], env=env)
+        return True
+    except Exception:                                   # noqa: BLE001
+        try:
+            from PySide6.QtCore import QUrl
+            from PySide6.QtGui import QDesktopServices
+            return bool(QDesktopServices.openUrl(QUrl.fromLocalFile(path)))
+        except Exception:                               # noqa: BLE001
+            return False
+
+
 def reveal_result(path: str) -> None:
     """Show the file in Finder/Explorer. Worth its own button because output
     lands in ~/.prism/runs, and a dot-folder is invisible in Finder — a user

@@ -22,6 +22,32 @@ Tests: **1966 passing** (6 skipped, 8 Sep 2026 after Round 16 landed on main —
   first entry, which is not a retirement; the check now passes the owner's saved model to
   every AI call, not only the sorter.
 
+- **The licence is far less likely to be asked for again after an update.** Prism now reads the licence
+  before the background renewal starts rewriting it, retries a read that fails for a moment (Windows
+  blocks reads while a file is replaced or virus-scanned, which used to look like "no licence"), finds the
+  Mac machine id by its full path, and writes a line to the log whenever the licence screen is about to
+  appear saying why.
+- **STEP: pictures and files open when clicked, on Mac and Windows.** Clicking a picture in the Files tab (it
+  now shows a thumbnail), a file row, the drawing sheet, or a built / styled file in the chat opens it in its
+  own window with the computer's own viewer. Each platform's own opener is used (`open` on a Mac,
+  `os.startfile` on Windows, `xdg-open` on Linux) instead of Qt's, which did nothing for local files on
+  the packaged apps.
+- **Settings tells you it saved, and checks your Groq key.** Settings is a window over the app, so the
+  "Saved." that used to appear in the app's status bar was hidden behind it and a Save looked like nothing
+  happened. A message now appears at the foot of the Settings window (green saved, amber warning, red
+  problem); saving a Groq key also asks Groq whether it works and says so ("Saved — Groq accepts this key", or
+  "Saved, but Groq rejected this key…"). The STEP screen now always uses the app's current settings, so a
+  key saved after it was first opened is the one it uses. The default look is a plain white screen — no
+  wallpaper, no logo — until a wallpaper is chosen in Settings → Appearance.
+- **STEP: Ask and Edit are two different things, and every answer says who gave it.** Fixed from a
+  tester's report: a follow-up no longer overwrites the first answer (two questions used to show one
+  answer); choosing Groq no longer opens ChatGPT — Groq's answer is planned by Groq, in-house, with no
+  browser; the chat under an Ask has one button, "Ask", and "Make a change" appears only while you are
+  changing the model (the old "Build this" is gone); the main button reads "Ask" or "Make a change";
+  a question typed into Edit stays on the answer instead of opening an empty Plan tab; each answer, follow-up
+  and plan is labelled with the AI that wrote it (Groq, ChatGPT or Claude) and that survives a reopen;
+  follow-ups and the plan are given the whole conversation, not only the last reply; and answers are no
+  longer cut off at the bottom.
 - **One loader everywhere.** Waiting now looks the same on every screen: a staged pipeline (STEP, Reel,
   Motion, BOQ, Gerber) shows a segmented bar with its stages (Measure · Plan · Build · Check) and a live
   clock; the mail check and other counted waits show a ring; waiting on an AI tool (the email writer) shows
