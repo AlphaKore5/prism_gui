@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QListWidget,
                                QVBoxLayout, QWidget)
 
 import i18n
+from widgets.loader import Skeleton
 import theme
 from addons.whatsapp import readstate
 from addons.whatsapp.chat import (CONVO_ROW_H, ConversationDelegate,
@@ -130,6 +131,8 @@ class InboxPage(QWidget):
                                        i18n.t("When someone messages your WhatsApp number, "
                                               "the chat appears here."))
         self.list_stack.addWidget(self.list_empty)
+        self.list_loading = Skeleton(5)
+        self.list_stack.addWidget(self.list_loading)
         col.addWidget(self.list_stack, stretch=1)
 
         self.list_status = C.label("", level="META", colour=theme.NEUTRAL[500])
@@ -235,6 +238,9 @@ class InboxPage(QWidget):
         self._loading_convos = True
         if not silent:
             self.list_status.setText(i18n.t("Loading…"))
+            if not self._rows:
+                self.list_loading.setVisible(True)
+                self.list_stack.setCurrentWidget(self.list_loading)
         w = ConversationsLoadWorker()
         w.done.connect(self._on_convos)
         w.failed.connect(self._on_convos_failed)
@@ -243,6 +249,7 @@ class InboxPage(QWidget):
 
     def _on_convos_failed(self, error: str):
         self._loading_convos = False
+        self.list_loading.setVisible(False)
         self._last_error = error
         self.list_status.setText(i18n.t("Couldn't refresh — {e}").format(e=error))
         self.list_status.setStyleSheet(f"color: {theme.ERR_INK};")
@@ -253,6 +260,7 @@ class InboxPage(QWidget):
 
     def _on_convos(self, rows: list):
         self._loading_convos = False
+        self.list_loading.setVisible(False)
         self._last_error = ""
         self._rows = rows or []
         self.list_status.setStyleSheet(f"color: {theme.NEUTRAL[500]};")

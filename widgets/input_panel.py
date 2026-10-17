@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 import i18n
+from widgets.loader import Loader
 import theme
 from widgets import icons
 from widgets import controls as C
@@ -473,6 +474,12 @@ class InputPanel(Card):
         self.status.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.content.addWidget(self.status)
 
+        # Planning is a licence check and an AI call: Prism's orb, with the
+        # words, until the plan arrives.
+        self.thinking = Loader("orb")
+        self.thinking.setVisible(False)
+        self.content.addWidget(self.thinking)
+
         # ── context: what Prism is holding for this task ─────────────────
         self.context_box = QWidget(self)
         ctx = QVBoxLayout(self.context_box)
@@ -854,8 +861,15 @@ class InputPanel(Card):
         else:
             self.route_clicked.emit(self.text.toPlainText())
 
+    def set_busy_message(self, text: str):
+        """What the wait is on right now ("Checking your licence…")."""
+        self.thinking.set_message(text)
+
     def set_busy(self, busy: bool):
         self._busy = busy
+        if busy and not self.thinking.isVisibleTo(self):
+            self.thinking.set_message(i18n.t("Making a plan for your task…"))
+        self.thinking.setVisible(busy)
         self.route_btn.setText(
             i18n.t('Cancel') if busy else i18n.t('Make a plan'))
         # The Enter hint is about making the plan; while the button reads

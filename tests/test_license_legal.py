@@ -61,3 +61,22 @@ class LegalAcknowledgement(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TheLegalReaderKeepsEveryWord(unittest.TestCase):
+    def test_title_notice_and_date_are_lifted_out_not_dropped(self):
+        from dialogs.legal_dialog import split_document
+        parts = split_document(
+            "# T\n\n> **Status: DRAFT.** Not reviewed.\n\n"
+            "**Effective date:** [x] · **Last updated:** 1\n\n---\n\n## 1. A\n\ntext\n")
+        self.assertEqual(parts["title"], "T")
+        self.assertIn("DRAFT", parts["notice"])
+        self.assertIn("Last updated", parts["meta"])
+        self.assertTrue(parts["body"].startswith("## 1. A"))
+
+    def test_both_real_documents_give_a_contents_list_of_every_section(self):
+        from dialogs.legal_dialog import LegalDialog
+        for name, n in (("TERMS_OF_USE.md", 12), ("PRIVACY_POLICY.md", 12)):
+            d = LegalDialog("x", name)
+            self.assertEqual(d.toc.count(), n)
+            self.assertIn("Alphakore", d.view.toPlainText())

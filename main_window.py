@@ -18,7 +18,7 @@ from PySide6.QtGui import QGuiApplication, QFont, QCursor, QDesktopServices, QPa
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QMessageBox, QFrame,
     QFileDialog, QDialog, QLabel, QScrollArea, QStackedWidget, QPushButton,
-    QMenu, QApplication, QProgressDialog, QGraphicsScene, QGraphicsBlurEffect,
+    QMenu, QApplication, QGraphicsScene, QGraphicsBlurEffect,
     QGraphicsOpacityEffect, QAbstractButton, QAbstractItemView, QAbstractSpinBox,
     QComboBox, QLineEdit, QPlainTextEdit, QTextEdit,
 )
@@ -29,6 +29,7 @@ import core_bridge as CB
 import email_config
 import diagnostics
 import i18n
+from widgets.loader import LoadingDialog
 import identity
 import licensing
 import paths
@@ -113,13 +114,14 @@ SCREENS = (
     "step",
     "leads",
     "whatsapp",         # appended last: nothing above renumbers
+    "step_work",        # STEP's workbench — reached by the rail, never by name
 )
 _INDEX = {name: i for i, name in enumerate(SCREENS)}
 
 # The two that exist as pages but are NOT addressable by name. Asking
 # _show_screen() for either falls through to HOME, exactly as before -- they
 # were simply absent from the old hand-written table.
-_UNROUTED = {"wizard", "inquiry_work"}
+_UNROUTED = {"wizard", "inquiry_work", "step_work"}
 SCREEN_INDEX = {n: i for n, i in _INDEX.items() if n not in _UNROUTED}
 SCREEN_NAME = {i: n for n, i in SCREEN_INDEX.items()}
 
@@ -139,6 +141,7 @@ ARTIFACTS = _INDEX["artifacts"]
 INQUIRY_WORK = _INDEX["inquiry_work"]
 BOM = _INDEX["bom"]
 STEP = _INDEX["step"]
+STEP_WORK = _INDEX["step_work"]
 
 # Wake-word threads that were asked to stop but had not finished in time.
 # Module level, not an attribute: on window close there is nothing else left
@@ -518,6 +521,13 @@ class MainWindow(QMainWindow):
         self.screens.addWidget(self.leads_panel)            # LEADS
         self.whatsapp_panel = WhatsAppPanel(self.cfg)
         self.screens.addWidget(self.whatsapp_panel)         # WHATSAPP (last: no renumber)
+        # STEP's workbench page: an empty host now, filled the first time STEP
+        # is opened (building it imports the CAD engine, which most sessions
+        # never need).
+        self.step_host = QWidget()
+        host_lay = QVBoxLayout(self.step_host)
+        host_lay.setContentsMargins(0, 0, 0, 0)
+        self.screens.addWidget(self.step_host)              # STEP_WORK
         outer.addWidget(self.screens, stretch=1)
         shell.addWidget(columns, stretch=1)
         self.setCentralWidget(central)
@@ -574,6 +584,7 @@ class MainWindow(QMainWindow):
         self.boq_panel.opened.connect(self._open_boq_dialog)
         self.bom_panel.opened.connect(self._open_bom_dialog)
         self.step_panel.opened.connect(self._open_step_dialog)
+        self.step_work = None           # built on first visit — see _step_screen
         self.gerber_panel.opened.connect(self._open_gerber_dialog)
         self.email_panel.opened.connect(lambda: self._open_email_dialog("one"))
         self.email_panel.open_compose.connect(self._open_email_dialog)
@@ -845,12 +856,8 @@ class MainWindow(QMainWindow):
         if not paths.is_frozen():
             self._open_download_fallback()
             return
-        self._download_progress = QProgressDialog(
-            i18n.t("Checking for an update…"), i18n.t("Cancel"), 0, 0, self)
-        self._download_progress.setWindowTitle(i18n.t("Update"))
-        self._download_progress.setAutoClose(False)
-        self._download_progress.setMinimumDuration(0)
-        self._download_progress.canceled.connect(self._download_progress.hide)
+        self._download_progress = LoadingDialog(
+            i18n.t("Update"), i18n.t("Checking for an update…"), True, self)
 
         def moved(done: int, total: int):
             box = self._download_progress
@@ -1487,13 +1494,11 @@ class MainWindow(QMainWindow):
         if answer != QMessageBox.Yes:
             return
 
-        from PySide6.QtWidgets import QProgressDialog
-        box = QProgressDialog(i18n.t("Downloading FFmpeg…"), "", 0, 100, self)
-        box.setWindowTitle(i18n.t("Reel"))
-        box.setCancelButton(None)      # a half-written binary helps nobody
-        box.setAutoClose(False)
-        box.setMinimumDuration(0)
+        box = LoadingDialog(i18n.t("Reel"), i18n.t("Downloading FFmpeg…"),
+                            False, self)      # a half-written binary helps nobody
+        box.setMaximum(100)
         box.setValue(0)
+        box.show()
 
         def moved(done: int, total: int):
             if total:
@@ -1658,9 +1663,23 @@ class MainWindow(QMainWindow):
 
     def _open_step(self):
         # STEP is its own add-on since 2026-09-10 -- see addons/step/addon.py.
-        self._authorized_then("step", "addon", lambda: self._show_screen("step"))
+        # It opens straight into its workbench: one screen for measuring,
+        # asking, editing, the answer, the plan, the files and the history of
+        # past runs. No popup windows stacked on top of each other.
+        self._authorized_then("step", "addon", self._open_step_dialog)
 
-    def _open_step_dialog(self):
+    def _step_screen(self):
+        """The STEP workbench, built the first time it is needed and kept —
+        the same pattern as the Email inquiries screen."""
+        if self.step_work is None:
+            self.step_work = StepDialog(self.cfg, [], self.step_host,
+                                        embedded=True)
+            self.step_host.layout().addWidget(self.step_work)
+            self.step_work.leave_requested.connect(
+                lambda: self._show_screen("home"))
+        return self.step_work
+
+    def _open_step_dialog(self, paths=None, run: str = ""):
         # Unlike Gerber this has a hard dependency -- cadquery, which
         # carries OpenCascade -- so the message is a real customer-facing
         # one: the add-on cannot measure anything without it.
@@ -1672,25 +1691,20 @@ class MainWindow(QMainWindow):
                 "models:\n\n    pip install cadquery\n\n"
                 f"Detail: {err}")
             return
-        dlg = StepDialog(self.cfg, [], self)
-        dlg.exec()
-        # A run finished in the dialog must show on the screen behind it.
-        self.step_panel.refresh()
+        screen = self._step_screen()
+        screen.cfg = self.cfg
+        screen.enter()
+        self.screens.setCurrentIndex(STEP_WORK)
+        self.sidebar.set_current("step")
+        if run:
+            screen.load_run(run)
+        elif paths:
+            screen._on_files_added(list(paths))
         # Deliberately NOT offering the ordinary routed-pipeline follow-up
-        # here (BOQ/BOM still do, right above). It used to: STEP ran its
-        # own worker chain and never reached _on_run_done, so that offer
-        # was invisible from inside it, same gap BOQ/BOM bridge. But for
-        # STEP specifically that bridge became a dead end once its own
-        # Answer popup grew a real follow-up + "Build this": the generic
-        # one here can only ever save a refined TEXT answer into history —
-        # it never calls apply_plan, so no matter what the tool writes
-        # back, nothing is ever actually built. A customer followed up
-        # here, ChatGPT wrote something that read like real code, and no
-        # file appeared — twice, once from here and once from History's
-        # own "Follow up" button, which runs the identical dead-end code.
-        # STEP's own popup is now the one place a follow-up can actually
-        # become a file; this one is left unoffered so there is only ever
-        # one door, and it works.
+        # here (BOQ/BOM still do). STEP's own answer window is the one place
+        # a follow-up can actually become a file (it calls apply_plan); the
+        # generic one only ever saved a refined TEXT answer, so a customer
+        # followed up there and no file appeared. One door, and it works.
 
     def _open_leads(self):
         # Front door first, like BOQ/Email: the rail switches screens, and the
@@ -1820,6 +1834,16 @@ class MainWindow(QMainWindow):
                                         agents, record.get("links") or {},
                                         artifacts_dir=record.get("artifacts") or "")
 
+    @staticmethod
+    def _is_step_run(path: str) -> bool:
+        """A run record written by the STEP add-on — it reopens in STEP's own
+        screen, not in the generic history viewer."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return bool((json.load(f) or {}).get("step"))
+        except (OSError, ValueError, AttributeError):
+            return False
+
     def _open_run_record(self, path: str):
         """Open History on one particular run.
 
@@ -1827,6 +1851,9 @@ class MainWindow(QMainWindow):
         stored record into readable output, so clicking a row hands that path
         over rather than duplicating the renderer.
         """
+        if self._is_step_run(path):
+            self._open_step_dialog(run=path)
+            return
         dialog = self._history_dialog()
         runs = getattr(dialog, "runs", None)
         if runs is not None and path:
@@ -2183,6 +2210,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(
                 f"Planning task {self._task_pos} of {len(self._task_queue)}…", 0)
         self.input_panel.set_busy(True)
+        self.input_panel.set_busy_message(i18n.t("Checking your licence…"))
         # Planning is itself a Groq call — it costs tokens and is the step
         # every run begins with — so it is authorised and metered like one.
         # Gating only "Start the work" left the whole planning path reachable
@@ -2246,6 +2274,7 @@ class MainWindow(QMainWindow):
                 i18n.t("Working offline — Prism couldn't reach the licence "
                        "server, so it's using this computer's saved "
                        "authorisation."), 8000)
+        self.input_panel.set_busy_message(i18n.t("Making a plan for your task…"))
         worker = RouteWorker(query, self.cfg, self.attachments)
         worker.done.connect(self._on_routed)
         worker.failed.connect(self._on_route_failed)
@@ -4020,6 +4049,8 @@ class MainWindow(QMainWindow):
         # The support assistant keeps its own worker — wound up here beside
         # everything else, or its thread aborts the teardown the same way.
         self.support_panel.shutdown()
+        if getattr(self, "step_work", None) is not None:
+            self.step_work.shutdown()
         if hasattr(self, "lumi_panel"):
             self.lumi_panel.shutdown()
         # Every worker still running has to be stopped and JOINED before the

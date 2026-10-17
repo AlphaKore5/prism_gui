@@ -16,7 +16,7 @@ import time
 
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QPushButton,
-    QPlainTextEdit, QLineEdit, QMessageBox, QCheckBox, QProgressBar,
+    QPlainTextEdit, QLineEdit, QMessageBox, QCheckBox,
     QComboBox, QWidget,
 )
 
@@ -28,6 +28,7 @@ import wakeword
 from dialogs.base import PrismDialog
 from workers import AutomationWorker, MeasureWorker, RecordWorker
 from widgets import controls as C
+from widgets.loader import Loader
 from widgets.ask_panel import AskPanel, MoreOptions
 from addons.boq.measured import MeasuredTable
 from addons.boq.pricing import PricingTable
@@ -270,7 +271,7 @@ class BoqDialog(PrismDialog):
         self.more.add(self.derive_cb)
         root.addWidget(self.more)
 
-        self.progress = QProgressBar()
+        self.progress = Loader("stages", [i18n.t(n) for n in ['Measure', 'Check', 'Write']])
         self.progress.setRange(0, 0)
         self.progress.setVisible(False)
         root.addWidget(self.progress)
@@ -337,6 +338,7 @@ class BoqDialog(PrismDialog):
     def _measure(self):
         if not self.cad_path or not os.path.exists(self.cad_path):
             return
+        self.progress.set_stage(0)
         self._set_busy(True, f"Reading {os.path.basename(self.cad_path)} — "
                              "a large drawing can take a minute…")
         self._measure_worker = MeasureWorker(
@@ -442,6 +444,7 @@ class BoqDialog(PrismDialog):
         worker = getattr(self, "_measure_worker", None)
         if self.cad_path and self.q is None and worker is not None and worker.isRunning():
             self._run_pending = True
+            self.progress.set_stage(0)
             self._set_busy(True, "Finishing measuring the drawing — your BOQ "
                                  "starts the moment it's done…")
             return
@@ -471,6 +474,7 @@ class BoqDialog(PrismDialog):
         self._stage_log = []
 
         if self.derive_cb.isChecked() and self.researcher:
+            self.progress.set_stage(1)
             self._set_busy(True, f"{self.researcher} is checking the standard "
                                  "sizes and norms…")
             self._worker = AutomationWorker(
@@ -528,6 +532,7 @@ class BoqDialog(PrismDialog):
         if not self.interpreter:
             self._write()
             return
+        self.progress.set_stage(1)
         self._set_busy(True, f"{self.interpreter} is reading the drawing "
                              "screenshot and your sample…")
         prompt = self.boq.interpretation_prompt(
@@ -555,6 +560,7 @@ class BoqDialog(PrismDialog):
         self._write()
 
     def _write(self):
+        self.progress.set_stage(2)
         self._set_busy(True, f"{self.writer_agent} is writing your BOQ…")
         prompt = self._pm.formatting_prompt(
             self.summary, project_context=self.request,
@@ -647,10 +653,12 @@ class BoqDialog(PrismDialog):
         QMessageBox.warning(self, "BOQ", error)
 
     def _set_busy(self, busy: bool, message: str):
+        if busy:
+            self.progress.set_message(message)
         self.progress.setVisible(busy)
         self.run_btn.setEnabled(not busy)
         self.recheck_btn.setEnabled(not busy and bool(self.cad_path and self.result.toPlainText().strip()))
-        self.status.setText(message)
+        self.status.setText("" if busy else message)   # the loader carries it while busy
 
     def _drawing_consent(self) -> bool:
         """The drawing leaves this computer only after this explicit yes."""
@@ -675,6 +683,7 @@ class BoqDialog(PrismDialog):
         stage = "recheck" if verify else "followup"
         self._followup_agent = agent
         self._followup_stage = stage
+        self.progress.set_stage(2)
         self._set_busy(True, f"{agent} is working on your {self._noun}…")
         prompt = (f"{note}\n\nMEASURED FIGURES:\n{self.summary}\n\n"
                   f"PREVIOUS ANSWER:\n{self.result.toPlainText()}")

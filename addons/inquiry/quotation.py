@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 import core_bridge as CB
 import email_config
 import i18n
+from widgets.loader import busy_button
 import theme
 from dialogs.base import PrismDialog
 from addons.inquiry import autoquote, documents
@@ -1003,7 +1004,7 @@ class QuotationDialog(PrismDialog):
                            "Reading and sending are separate accounts on "
                            "purpose."))
                 return
-            self.send_btn.setEnabled(False)
+            busy_button(self.send_btn, True, i18n.t("Sending"))
             self._send_worker = SendWorker(
                 email_config.cfg_for_sender(self.cfg, sender),
                 [{"email": address,
@@ -1029,7 +1030,7 @@ class QuotationDialog(PrismDialog):
         return email_config.default_sender(self.cfg)
 
     def _sent(self, sent: list, failed: list):
-        self.send_btn.setEnabled(True)
+        busy_button(self.send_btn, False)
         if failed:
             self.parent_dialog._explain(failed[0][1])
             return
@@ -1041,7 +1042,7 @@ class QuotationDialog(PrismDialog):
         self.accept()
 
     def _send_failed(self, message: str):
-        self.send_btn.setEnabled(True)
+        busy_button(self.send_btn, False)
         self.parent_dialog._explain(message)
 
     def _record(self, register, paths, *, sent: bool):

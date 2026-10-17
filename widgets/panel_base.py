@@ -102,6 +102,16 @@ _NO_QUERY = "Untitled task"
 
 
 # ── small shared helpers ────────────────────────────────────────────────────
+def _tip(text: str) -> str:
+    """A tooltip that keeps its own colours. A tooltip inherits the style
+    sheet of the widget it hangs off, so a label styled with dark text put
+    dark text on the tooltip's black background (seen on the STEP recent-runs
+    list, 15 Oct 2026). Rich text carries its colour with it."""
+    import html
+    return ("<div style='color:#ffffff'>"
+            + html.escape(text or "").replace("\n", "<br>") + "</div>")
+
+
 class _Elided(QLabel):
     """A single-line label that is allowed to shrink.
 
@@ -146,12 +156,12 @@ class _Elided(QLabel):
         if max_w:
             self.setMaximumWidth(max_w)
         if self._full:
-            self.setToolTip(self._full)
+            self.setToolTip(_tip(self._full))
         self._apply()
 
     def set_full_text(self, text: str):
         self._full = text or ""
-        self.setToolTip(self._full)
+        self.setToolTip(_tip(self._full))
         self._apply()
 
     def resizeEvent(self, event):
@@ -574,7 +584,7 @@ class _RunRow(QFrame):
             row.addWidget(binw)
 
         self.setAccessibleName(f"{title}. {run.get('when', '')}")
-        self.setToolTip(run.get("title", "") or title)
+        self.setToolTip(_tip(run.get("title", "") or title))
 
     def mousePressEvent(self, event):
         # A press that landed on the tick box or the bin belongs to them.

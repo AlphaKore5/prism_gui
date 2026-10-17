@@ -23,6 +23,11 @@ def open_with_files(parent, cfg: dict, paths) -> None:
     constructor takes is the workbench's, which a caller by intent does not
     have; the models go in through the same door a drop uses.
     """
+    # Inside the app, hand over to the STEP screen — one window for all of it.
+    opener = getattr(parent, "_open_step_dialog", None)
+    if callable(opener):
+        opener(paths=list(paths or ()))
+        return
     from addons.step.dialog import StepDialog
     dlg = StepDialog(cfg, [], parent)
     dlg._on_files_added(list(paths or ()))

@@ -10,6 +10,51 @@ Tests: **1966 passing** (6 skipped, 8 Sep 2026 after Round 16 landed on main —
 
 ---
 
+# 1.6.7 — Email inquiries: newest first, no zero acknowledgements, quieter mail check (15 Oct 2026)
+
+- **The Inquiry column shows the newest mail first.** With 15 inquiries the one that had
+  just arrived sat at the bottom, below the fold, and read as "it never arrived".
+- **An order Prism cannot price sends nothing.** A PO naming no rate-list code priced to
+  zero lines, and the acknowledgement still went out as a quotation for ₹0.00 with a new
+  quotation number. Prism now says nothing could be matched and stops.
+- **The mail check no longer logs "Groq no longer offers the saved model" on every call
+  or rewrites the config each time.** Calls with no model named start at the chain's
+  first entry, which is not a retirement; the check now passes the owner's saved model to
+  every AI call, not only the sorter.
+
+- **One loader everywhere.** Waiting now looks the same on every screen: a staged pipeline (STEP, Reel,
+  Motion, BOQ, Gerber) shows a segmented bar with its stages (Measure · Plan · Build · Check) and a live
+  clock; the mail check and other counted waits show a ring; waiting on an AI tool (the email writer) shows
+  Prism's orb; the button that started the work says "Working ●●●" and is disabled until it is done; WhatsApp
+  chat and contact lists show placeholder rows while they load. The main run's header is a segmented bar, one
+  segment per step; Make a plan shows the orb ("Checking your licence…", then "Making a plan…"); the update and
+  FFmpeg downloads, and opening the sign-in tabs, use the same ring in a small window; the Drive picker and
+  Leads show the ring beside their status line. One component, `widgets/loader.py`.
+- **Terms of Use and Privacy Policy read like documents.** A contents list on the left follows you as you
+  scroll, the text is typeset with a readable line length and real tables, and the "draft, not yet reviewed"
+  note is a visible notice above the text instead of a grey quote inside it. The wording is unchanged.
+- **STEP is one screen, and one chat per part.** It opens straight into its workbench — no front door,
+  no stacked windows. History on the left lists chats, not runs: everything done to a part and its edited
+  copies (draft, ask, edit) is one thread. Open it a week later and both files are offered to carry on from —
+  the original and the edited copy. A past STEP run opened from History or Home lands here too. A chat starts empty when a file is attached and counts what is done in it (0, 1, 1+n); a new file
+  is a new chat, and old chats are reopened from History. The Chat tab is organised to scan: a count, numbered
+  jump dots, runs grouped by day as one-line rows (newest open, answers rendered as Markdown). Nothing opens over
+  the window any more: an Ask's answer appears in the Chat tab with a follow-up box (and Build this) under it; an
+  Edit's plan appears in the Plan tab with a Build bar — nothing is built until you press it, no browser page
+  opens, and a plan with nothing to build says why and what to do next; errors show in the window. The chat
+  lists the newest run first. The checks before a run (no question typed, Groq without a key, Edit without a
+  reasoning tool) now speak in the window too, and a styled ChatGPT copy of the sheet is named on its Draft card.
+  **Delete from the left bar:** a bin on each History chat removes the chat's run records (the files stay), and
+  a bin on a model removes the folder Prism made for it — only a folder directly inside your STEP folder, never
+  your original STEP file, and only after you confirm.
+- **STEP is a workbench.** One screen with three columns — models and options on the left, the
+  drawing sheet and one action at a time (Draft / Ask / Edit) in the centre, and the results in
+  tabs on the right (Measured · Answer · Files). Options and the K-factor sit away from the main
+  flow; the question box shows only for Ask and Edit; the Files tab lists every file written for
+  the models, with Open and Show. All the measuring, asking, planning and building code is unchanged.
+
+---
+
 # 1.6.6 — a removed file could still be measured and billed (15 Oct 2026)
 
 **1.6.5 was never signed for in-app update — this release supersedes it.**

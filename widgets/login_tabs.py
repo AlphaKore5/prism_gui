@@ -41,7 +41,12 @@ def open_login_tabs(parent, agents: dict, on_opened=None) -> bool:
     if running is not None and running.isRunning():
         return False
     from workers import LoginTabsWorker
+    from widgets.loader import LoadingDialog
+    wait = LoadingDialog(title, i18n.t("Opening your sign-in tabs…"), False, parent)
+    wait.show()
     worker = LoginTabsWorker(urls, parent)
+    worker.done.connect(lambda *_: wait.close())
+    worker.failed.connect(lambda *_: wait.close())
     parent._login_tabs_worker = worker
     if on_opened is not None:
         worker.done.connect(on_opened)

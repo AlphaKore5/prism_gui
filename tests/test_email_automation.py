@@ -131,6 +131,7 @@ class _FakeCheckWorker:
              dict(getattr(knowledge, "learned", {}) or {})))
         self.done = _Signal()
         self.failed = _Signal()
+        self.progress = _Signal()       # the real worker reports per-mail progress
 
     def start(self):
         result = _FakeCheckWorker.results.get(self.address)

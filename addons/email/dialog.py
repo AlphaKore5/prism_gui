@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 import core_bridge as CB
 import email_config
 import i18n
+from widgets.loader import Loader, busy_button
 from addons.email import sent_log
 import theme
 from dialogs.base import PrismDialog
@@ -400,14 +401,14 @@ class EmailSetupDialog(PrismDialog):
         account = self._account()
         if not account:
             return
-        self.test_btn.setEnabled(False)
+        busy_button(self.test_btn, True, i18n.t("Signing in"))
         self.status.setText(f"Signing in to {account['host']}…")
         self._verify_worker = VerifyWorker({"email": account})
         self._verify_worker.done.connect(self._on_verified)
         self._verify_worker.start()
 
     def _on_verified(self, error: str):
-        self.test_btn.setEnabled(True)
+        busy_button(self.test_btn, False)
         if error:
             self.status.setText(f"✗  {error}")
         else:
@@ -814,6 +815,10 @@ class EmailComposeDialog(PrismDialog):
         self.status.setObjectName("dim")
         self.status.setWordWrap(True)
         self.status.setOpenExternalLinks(True)
+        # Waiting on an AI tool: Prism's own orb, with the words beside it.
+        self.thinking = Loader("orb")
+        self.thinking.setVisible(False)
+        root.addWidget(self.thinking)
         root.addWidget(self.status)
 
         self.footer.add_secondary(
@@ -1211,9 +1216,12 @@ class EmailComposeDialog(PrismDialog):
             "expect": "SUBJECT:",
             "questions": [CB.mailer.draft_question(goal)]}}
         self._last_run = {"routing": routing, "agent": agents[draft_stage]}
-        self.write_btn.setEnabled(False)
-        self.status.setText(i18n.t("Writing with {tool}… this takes a minute or "
-                                   "two.").format(tool=agents[draft_stage]))
+        busy_button(self.write_btn, True, i18n.t("Writing"))
+        wait = i18n.t("Writing with {tool}… this takes a minute or "
+                      "two.").format(tool=agents[draft_stage])
+        self.status.setText("")
+        self.thinking.set_message(wait)
+        self.thinking.setVisible(True)
         self._worker = AutomationWorker(routing, self.cfg, self.source_files,
                                         f"write an email: {goal}")
         self._worker.done.connect(self._on_draft_done)
@@ -1221,11 +1229,13 @@ class EmailComposeDialog(PrismDialog):
         self._worker.start()
 
     def _on_draft_failed(self, error: str):
-        self.write_btn.setEnabled(True)
+        self.thinking.setVisible(False)
+        busy_button(self.write_btn, False)
         self.status.setText(i18n.t("Could not write it: {error}").format(error=error))
 
     def _on_draft_done(self, responses: dict, links: dict):
-        self.write_btn.setEnabled(True)
+        self.thinking.setVisible(False)
+        busy_button(self.write_btn, False)
         texts = responses.get(self._draft_stage) or []
         self._last_run.update({"responses": responses, "links": links})
         usable = [t for t in texts if not CB.mailer.is_prompt_echo(t)]

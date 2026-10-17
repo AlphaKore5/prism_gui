@@ -702,6 +702,7 @@ class InboxCheckWorker(_Worker):
     """
     done = Signal(object)         # mailflow.Result
     failed = Signal(str)
+    progress = Signal(str, int, int)      # stage, done, total (total 0 = unknown)
 
     def __init__(self, cfg: dict, root: str, *, state=None, knowledge=None,
                  local_only: bool = False, followup_days: int = 2,
@@ -719,7 +720,9 @@ class InboxCheckWorker(_Worker):
                 self.cfg, mailflow.Paths(self.root), state=self.state,
                 knowledge=self.knowledge, local_only=self.local_only,
                 followup_days=self.followup_days,
-                max_reminders=self.max_reminders)
+                max_reminders=self.max_reminders,
+                progress=lambda stage, done, total: self.progress.emit(
+                    stage, int(done), int(total)))
             self.done.emit(result)
         except Exception as e:
             self.failed.emit(str(e))

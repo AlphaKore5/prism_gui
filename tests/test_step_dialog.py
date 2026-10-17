@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 os.environ.setdefault("PRISM_LICENSE_OFFLINE_DEV", "1")
+from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
@@ -32,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import sample_jobs  # noqa: E402
 from test_gates import GateTest  # noqa: E402
 from addons.step import dialog as SD  # noqa: E402
+from addons.step import sessions as SES  # noqa: E402
 from addons.step.dialog import StepDialog  # noqa: E402
 from dialogs.answer_dialog import AnswerDialog  # noqa: E402
 from core import stepfile as SF  # noqa: E402
@@ -342,10 +344,11 @@ class AnAgentOnlyEverSeesTheNumbersAndPrismsOwnRender(unittest.TestCase):
         dlg.ask.set_text("make it lighter")
         dlg._current = m
         dlg._action_buttons["edit"].setChecked(True)
-        with mock.patch.object(SD, "AutomationWorker", _CaptureWorker), \
-                mock.patch.object(SD, "AnswerDialog") as answer:
+        with mock.patch.object(SD, "AutomationWorker", _CaptureWorker):
             dlg._on_suggested("1) thin the wall")
-        answer.return_value.exec.assert_called_once()
+        # The answer is in the chat at once — no window opened for it.
+        self.assertEqual(dlg._live["answer"], "1) thin the wall")
+        self.assertIs(dlg.chat_stack.currentWidget(), dlg.chat)
         seen = _CaptureWorker.seen
         prompt = seen["kwargs"]["custom_stages"][0][2][0]
         self.assertEqual(seen["kwargs"]["custom_stages"][0][1], "Claude")
@@ -355,7 +358,6 @@ class AnAgentOnlyEverSeesTheNumbersAndPrismsOwnRender(unittest.TestCase):
         self.assertNotIn("/secret/place", prompt)
         for a in seen["args"][2]:
             self.assertFalse(a["path"].lower().endswith((".step", ".stp")))
-
     def test_the_groq_question_carries_numbers_and_confidentiality(self):
         dlg = _dialog()
         m = _fake_measured(dlg)
@@ -366,10 +368,8 @@ class AnAgentOnlyEverSeesTheNumbersAndPrismsOwnRender(unittest.TestCase):
     def test_ask_shows_only_the_answer_no_plan_and_no_page(self):
         """Ask's whole deliverable is the suggestion text — it must never
         reach the planning stage, so no AutomationWorker is built, no
-        review page is written, and nothing is opened. (Round: a plain
-        question used to always get reviewed into a change plan — hole
-        enlarges, scale factors — and a webpage popped open even when
-        nothing was asked to change; that's Edit's job now, not Ask's.)"""
+        review page is written, and nothing is opened — no window, no
+        browser page. The answer is in the Chat tab."""
         dlg = _dialog()
         m = _fake_measured(dlg)
         dlg.ask.set_text("which material fits best?")
@@ -378,18 +378,21 @@ class AnAgentOnlyEverSeesTheNumbersAndPrismsOwnRender(unittest.TestCase):
         _CaptureWorker.seen = {}          # not reset between tests otherwise
         with mock.patch.object(SD.QDesktopServices, "openUrl") as opened, \
                 mock.patch.object(SD, "AutomationWorker", _CaptureWorker), \
-                mock.patch.object(SD, "AnswerDialog") as answer, \
-                mock.patch.object(CB.config, "save_run"):
+                mock.patch.object(SD.QMessageBox, "warning") as warned, \
+                mock.patch.object(CB.config, "save_run", side_effect=OSError):
             dlg._on_suggested("PP for cost, ABS for a balance of cost "
                               "and strength.")
-        answer.return_value.exec.assert_called_once()
         opened.assert_not_called()
+        warned.assert_not_called()
         self.assertEqual(_CaptureWorker.seen, {},
                          "Ask must never start the plan stage")
-        self.assertIn("PP for cost", dlg.result.toPlainText())
+        self.assertIn("PP for cost", dlg.chat.cards[0].turn["answer"])
         self.assertTrue(any("choose Edit" in n for n in dlg._notes))
-
+        self.assertTrue(dlg.composer.isVisibleTo(dlg),
+                        "the follow-up box carries the conversation on")
     def test_edit_reviews_the_plan_then_asks_before_building(self):
+        """The plan lands in the Plan tab with a Build bar; nothing is built
+        until Build is pressed."""
         dlg = _dialog()
         m = _fake_measured(dlg)
         dlg.ask.set_text("fit 6mm")
@@ -407,11 +410,14 @@ class AnAgentOnlyEverSeesTheNumbersAndPrismsOwnRender(unittest.TestCase):
             def start(self):
                 built["started"] = True
 
-        with mock.patch.object(SD, "StepApplyWorker", FakeApply), \
-                mock.patch.object(SD, "PlanReviewDialog") as review_dlg:
-            review_dlg.return_value.exec.return_value = 1   # Accepted
+        with mock.patch.object(SD, "StepApplyWorker", FakeApply):
             dlg._on_planned({"plan": [plan]}, {})
-            review_dlg.return_value.exec.assert_called_once()
+            self.assertEqual(built, {}, "nothing is built before Build is pressed")
+            self.assertTrue(dlg._awaiting)
+            self.assertTrue(dlg.plan_panel.build_btn.isVisibleTo(dlg.plan_panel))
+            self.assertFalse(dlg.generate_btn.isEnabled())
+            self.assertEqual(dlg.out_stack.currentIndex(), 2)
+            dlg._confirm_build()
             self.assertTrue(built["started"])
             # The worker is handed the ORIGINAL path to read, and writes the
             # copy under the model's own name in the model's own folder.
@@ -419,7 +425,6 @@ class AnAgentOnlyEverSeesTheNumbersAndPrismsOwnRender(unittest.TestCase):
             self.assertEqual(built["args"][4], m["out_dir"])
             self.assertTrue(os.path.exists(
                 os.path.join(m["out_dir"], SF.names(m["report"])["review"])))
-
     def test_a_no_answer_builds_nothing(self):
         dlg = _dialog()
         m = _fake_measured(dlg)
@@ -429,13 +434,32 @@ class AnAgentOnlyEverSeesTheNumbersAndPrismsOwnRender(unittest.TestCase):
         plan = ('{"changes": [{"op": "scale", "part": "all", "factor": 2, '
                 '"why": ""}], "advice": []}')
         with mock.patch.object(CB.config, "save_run"), \
-                mock.patch.object(SD, "StepApplyWorker") as apply_w, \
-                mock.patch.object(SD, "PlanReviewDialog") as review_dlg:
-            review_dlg.return_value.exec.return_value = 0   # Rejected
+                mock.patch.object(SD, "StepApplyWorker") as apply_w:
             dlg._on_planned({"plan": [plan]}, {})
+            dlg._skip_build()
             apply_w.assert_not_called()
         self.assertTrue(any("not built" in n for n in dlg._notes))
+        self.assertFalse(dlg._awaiting)
 
+    def test_a_plan_with_nothing_to_build_says_so_and_what_to_do_next(self):
+        """ChatGPT answered, but with no change Prism can apply (a vague
+        "make the holes bigger"): the Plan tab explains, offers to refine,
+        and the run finishes — no window, no dead end."""
+        dlg = _dialog()
+        m = _fake_measured(dlg)
+        dlg.ask.set_text("make the holes little bigger")
+        dlg._current = m
+        dlg._action_buttons["edit"].setChecked(True)
+        plan = '{"changes": [], "advice": ["Which holes? Prism needs a size."]}'
+        with mock.patch.object(CB.config, "save_run") as saved:
+            dlg._on_planned({"plan": [plan]}, {})
+        saved.assert_called_once()                    # the run finished
+        from PySide6.QtWidgets import QLabel
+        texts = " ".join(l.text() for l in dlg.plan_panel.findChildren(QLabel))
+        self.assertIn("Nothing to build yet", texts)
+        self.assertIn("Which holes?", texts)
+        self.assertFalse(dlg.plan_panel.bar.isVisibleTo(dlg.plan_panel))
+        self.assertFalse(dlg._awaiting)
 
 class ChoosingAStrongerModelThanGroq(unittest.TestCase):
     """Groq is the default, fast, in-house path (unchanged — covered
@@ -492,8 +516,9 @@ class ChoosingAStrongerModelThanGroq(unittest.TestCase):
         with mock.patch.object(SD.QMessageBox, "warning") as warn, \
                 mock.patch.object(SD, "StepAskWorker") as groq:
             dlg._ask_via_chain(m)
-            warn.assert_called_once()
+            warn.assert_not_called()                  # in the window, not a pop-up
             groq.assert_not_called()
+        self.assertIn("Neither ChatGPT nor Claude", dlg.status.text())
 
     def test_a_real_answer_stops_the_chain_and_records_its_agent(self):
         dlg = _dialog()
@@ -505,12 +530,10 @@ class ChoosingAStrongerModelThanGroq(unittest.TestCase):
         # This flows on into _on_suggested -> _next() -> _finish(), which
         # saves the run for real unless mocked (conftest fails the suite on
         # a write to the developer's own ~/.prism).
-        with mock.patch.object(SD, "AnswerDialog") as answer, \
-                mock.patch.object(CB.config, "save_run"):
+        with mock.patch.object(CB.config, "save_run"):
             dlg._on_asked_by_tool(
                 m, "Claude", {"ask": ["PP for cost, ABS for a balance."]},
                 {"ask": "https://claude.ai/chat/x"})
-        answer.return_value.exec.assert_called_once()
         self.assertEqual(dlg._model_chain, [],
                          "a real answer must stop the fallback chain")
         key = f"ask · {m['report']['stem']}"
@@ -518,7 +541,6 @@ class ChoosingAStrongerModelThanGroq(unittest.TestCase):
                          ["PP for cost, ABS for a balance."])
         self.assertEqual(dlg._stage_agents_map[key], "Claude")
         self.assertEqual(dlg._links[key], "https://claude.ai/chat/x")
-
     def test_groq_still_needs_its_own_key_but_the_others_do_not(self):
         dlg = _dialog(cfg={"agents": {"brains": "Claude"},
                            "step_out_dir": tempfile.mkdtemp()})   # no api_key
@@ -528,7 +550,8 @@ class ChoosingAStrongerModelThanGroq(unittest.TestCase):
         with mock.patch.object(SD.QMessageBox, "warning") as warn, \
                 mock.patch.object(SD, "StepMeasureWorker") as worker:
             dlg._generate()
-            warn.assert_called_once()
+            warn.assert_not_called()                      # in the window, not a pop-up
+            self.assertIn('Groq needs your key', dlg.status.text())
             worker.assert_not_called()
         self._pick(dlg, "Claude")
         with mock.patch.object(SD.QMessageBox, "warning") as warn, \
@@ -584,7 +607,7 @@ class TheConversationIsSavedToOneFilePerModel(unittest.TestCase):
         m = _fake_measured(dlg)
         self.assertEqual(dlg._load_conversation(m), [])
 
-    def test_on_suggested_seeds_the_popup_from_the_saved_file(self):
+    def test_a_second_ask_continues_the_saved_file_not_a_blank_one(self):
         """The whole point: a SECOND Ask on the same model must not start
         from blank — it continues the file the first one wrote."""
         dlg = _dialog()
@@ -593,26 +616,20 @@ class TheConversationIsSavedToOneFilePerModel(unittest.TestCase):
         dlg.ask.set_text("question two")
         dlg._save_conversation(m, [["You asked", "question one"],
                                    ["Groq", "answer one"]])
-        with mock.patch.object(SD, "AnswerDialog") as answer, \
-                mock.patch.object(CB.config, "save_run"):
+        with mock.patch.object(CB.config, "save_run"):
             dlg._on_suggested("answer two")
-        kwargs = answer.call_args.kwargs
-        self.assertEqual(kwargs["prior_thread"],
-                         [("You asked", "question one"),
-                          ("Groq", "answer one")])
-        self.assertTrue(callable(kwargs["on_change"]))
-
+        self.assertEqual(
+            dlg._load_conversation(m),
+            [("You asked", "question one"), ("Groq", "answer one"),
+             ("You asked", "question two"), ("Groq", "answer two")])
     def test_an_end_to_end_run_actually_writes_the_whole_thread(self):
-        """The real AnswerDialog this time (only its own .exec() stubbed
-        out, so the popup never actually blocks in a headless run) — this
-        proves the save actually fires end to end, not just that the
-        right callback was handed over."""
+        """No window, no stubbing of one: the answer arrives and the file is
+        written — and a follow-up typed in the chat is appended to it."""
         dlg = _dialog()
         m = _fake_measured(dlg)
         dlg._current = m
         dlg.ask.set_text("which material fits best?")
-        with mock.patch.object(SD.AnswerDialog, "exec", return_value=1), \
-                mock.patch.object(CB.config, "save_run"):
+        with mock.patch.object(CB.config, "save_run"):
             dlg._on_suggested("PP for cost.")
         path = dlg._conversation_path(m)
         self.assertTrue(os.path.exists(path))
@@ -620,17 +637,14 @@ class TheConversationIsSavedToOneFilePerModel(unittest.TestCase):
             saved = json.load(f)
         self.assertEqual(saved, [["You asked", "which material fits best?"],
                                  ["Groq", "PP for cost."]])
-        # Re-attaching the same model and asking again must pick this up.
-        dlg._current = m
-        dlg.ask.set_text("question two")
-        with mock.patch.object(SD, "AnswerDialog") as answer, \
-                mock.patch.object(CB.config, "save_run"):
-            dlg._on_suggested("answer two")
-        self.assertEqual(
-            answer.call_args.kwargs["prior_thread"],
-            [("You asked", "which material fits best?"),
-             ("Groq", "PP for cost.")])
-
+        key = f"ask · {m['report']['stem']}"
+        dlg._inline.question = "what about nylon?"
+        with mock.patch.object(CB.config, "save_run"):
+            dlg._on_answer_followup_done(dlg._inline, key, "Nylon needs drying.")
+        with open(path) as f:
+            saved = json.load(f)
+        self.assertEqual(saved[-2:], [["You followed up", "what about nylon?"],
+                                      ["Groq", "Nylon needs drying."]])
 
 class AFollowUpTypedInsideTheAnswerPopup(unittest.TestCase):
     """The popup's own "Follow up" button (beside Copy/Close) — a note
@@ -736,7 +750,8 @@ class AFollowUpTypedInsideTheAnswerPopup(unittest.TestCase):
         with mock.patch.object(SD.QMessageBox, "warning") as warn:
             dlg._on_answer_followup_agent_done(
                 fake_dlg, key, "Claude", {}, {})
-        warn.assert_called_once()
+        warn.assert_not_called()
+        self.assertIn("didn't answer", dlg.status.text())
         fake_dlg.set_answer.assert_not_called()
         self.assertEqual(dlg._responses[key], ["PP for cost."])
 
@@ -751,20 +766,19 @@ class BuildThisWorksFromAnyFollowUpEvenReopenedOnes(unittest.TestCase):
     all. "Build this" is that way, reachable from any popup at any time,
     not just the first one."""
 
-    def test_the_button_only_exists_when_the_action_was_edit(self):
+    def test_the_box_and_the_build_button_appear_under_an_answer(self):
+        """Follow up or Build this — in the chat, for any answer, once there
+        is a measurement behind it. (Used to be buttons in a pop-up.)"""
         dlg = _dialog()
         m = _fake_measured(dlg)
         dlg._current = m
         dlg.ask.set_text("q")
-        with mock.patch.object(SD, "AnswerDialog") as answer, \
-                mock.patch.object(CB.config, "save_run"):
+        self.assertFalse(dlg.composer.isVisibleTo(dlg))
+        with mock.patch.object(CB.config, "save_run", side_effect=OSError):
             dlg._action_buttons["ask"].setChecked(True)
             dlg._on_suggested("a")
-            self.assertFalse(answer.call_args.kwargs["allow_build"])
-            dlg._action_buttons["edit"].setChecked(True)
-            dlg._on_suggested("a")
-            self.assertTrue(answer.call_args.kwargs["allow_build"])
-
+        self.assertTrue(dlg.composer.isVisibleTo(dlg))
+        self.assertTrue(dlg.composer.build_btn.isVisibleTo(dlg.composer))
     def test_clicking_build_this_does_not_close_the_popup(self):
         dlg = AnswerDialog("t", "s", "q", "a", "Groq", allow_build=True)
         seen = []
@@ -794,7 +808,7 @@ class BuildThisWorksFromAnyFollowUpEvenReopenedOnes(unittest.TestCase):
         self.assertEqual((stage_key, tool), ("plan", "Claude"))
         self.assertIn("enlarge the Ø8.1mm hole to Ø8.6mm", prompts[0])
 
-    def test_on_planned_from_a_popup_opens_the_review_but_never_advances_the_queue(self):
+    def test_on_planned_from_the_chat_waits_for_build_and_never_advances_the_queue(self):
         dlg = _dialog()
         m = _fake_measured(dlg)
         dlg.ask.set_text("fit 6mm")
@@ -803,19 +817,19 @@ class BuildThisWorksFromAnyFollowUpEvenReopenedOnes(unittest.TestCase):
                 '"dia_mm": 8.1, "new_dia_mm": 8.6, "why": "test"}], '
                 '"advice": []}')
         fake_popup = mock.MagicMock()
-        with mock.patch.object(SD, "PlanReviewDialog") as review_dlg:
-            review_dlg.return_value.exec.return_value = 0   # declined
-            dlg._on_planned({"plan": [plan]}, {}, m=m, popup=fake_popup)
+        dlg._on_planned({"plan": [plan]}, {}, m=m, popup=fake_popup)
         fake_popup.set_busy.assert_any_call(False)
+        self.assertTrue(dlg._awaiting)
         self.assertEqual(len(dlg._queue), 1,
-                         "a popup-triggered build must never touch the queue")
-
+                         "a chat-triggered build must never touch the queue")
+        dlg._skip_build()
+        self.assertEqual(len(dlg._queue), 1)
     def test_on_applied_from_a_popup_clears_busy_and_leaves_the_queue_alone(self):
         dlg = _dialog()
         m = _fake_measured(dlg)
         dlg._queue = [{"report": {"file": "someone-else.step"}}]
         fake_popup = mock.MagicMock()
-        with mock.patch.object(SD.QDesktopServices, "openUrl"), \
+        with mock.patch.object(SD.QDesktopServices, "openUrl") as opened, \
                 mock.patch.object(CB.config, "save_artifact"):
             dlg._on_applied(
                 {"out": "/x/modified 2026-10-14 0700.step", "log": [],
@@ -825,6 +839,7 @@ class BuildThisWorksFromAnyFollowUpEvenReopenedOnes(unittest.TestCase):
                  "review": "/x/review.html"},
                 m=m, popup=fake_popup)
         fake_popup.set_busy.assert_called_with(False)
+        opened.assert_not_called()            # no browser page pops up
         self.assertEqual(len(dlg._queue), 1)
 
     def test_on_applied_shows_the_green_banner_with_the_built_path(self):
@@ -848,42 +863,27 @@ class BuildThisWorksFromAnyFollowUpEvenReopenedOnes(unittest.TestCase):
                       dlg.files_label.text())
         self.assertTrue(dlg.meas_box.isVisibleTo(dlg))
 
-    def test_the_automatic_first_build_still_advances_the_queue_exactly_once(self):
-        """The ordinary, unchanged path: a fresh Edit's own first answer,
-        never followed up on, still builds automatically (popup=None) and
-        still finishes the run — this must not regress."""
+    def test_a_plan_with_nothing_in_it_still_finishes_the_run_exactly_once(self):
+        """A fresh Edit's own first answer, planned automatically
+        (popup=None): when the plan has nothing to build it must still reach
+        _finish() once."""
         dlg = _dialog()
         m = _fake_measured(dlg)
         dlg._current = m
         dlg._queue = []
         dlg.ask.set_text("fit 6mm")
         dlg._action_buttons["edit"].setChecked(True)
-        with mock.patch.object(SD, "AnswerDialog") as answer, \
-                mock.patch.object(SD, "AutomationWorker", _CaptureWorker):
+        with mock.patch.object(SD, "AutomationWorker", _CaptureWorker):
             dlg._on_suggested("enlarge the hole")
-        answer.return_value.exec.assert_called_once()
-        self.assertFalse(dlg._built_from_popup,
-                         "the button was never clicked — only the "
-                         "automatic path ran")
         stage_key, _tool, _prompts = _CaptureWorker.seen["kwargs"]["custom_stages"][0]
         self.assertEqual(stage_key, "plan")
-        # Finish the chain by hand, as the real worker's `done` signal
-        # would — _on_planned's default (m=None, popup=None) is exactly
-        # this automatic path, and it must still reach _finish() once.
-        # PlanReviewDialog must be mocked here too: _on_planned opens one
-        # regardless of popup, and an unmocked one calls a real .exec()
-        # that blocks forever with nothing to click it closed.
-        with mock.patch.object(CB.config, "save_run") as saved, \
-                mock.patch.object(SD, "PlanReviewDialog") as review_dlg:
-            review_dlg.return_value.exec.return_value = 0   # Rejected/Close
+        with mock.patch.object(CB.config, "save_run") as saved:
             dlg._on_planned({"plan": ['{"changes": [], "advice": []}']}, {})
         saved.assert_called_once()
-
-    def test_build_this_clicked_inside_the_first_popup_is_not_built_twice(self):
-        """The bug this flag exists to prevent: "Build this" clicked
-        during a fresh Edit's own first popup must not ALSO trigger the
-        automatic build once that popup closes — that would plan and
-        build the same request twice."""
+    def test_build_this_from_the_chat_does_not_finish_or_restart_the_run(self):
+        """"Build this" in the chat asks for a plan on the answer on screen;
+        it never advances the queue of a run (there is none) and the answer
+        box shows it is working."""
         dlg = _dialog()
         m = _fake_measured(dlg)
         dlg._current = m
@@ -891,22 +891,13 @@ class BuildThisWorksFromAnyFollowUpEvenReopenedOnes(unittest.TestCase):
         dlg.ask.set_text("fit 6mm")
         key = f"ask · {m['report']['stem']}"
         dlg._responses[key] = ["enlarge the hole"]
-        dlg._action_buttons["edit"].setChecked(True)
-        fake_popup = mock.MagicMock()
-        with mock.patch.object(SD, "AnswerDialog", return_value=fake_popup), \
-                mock.patch.object(SD, "AutomationWorker", _CaptureWorker):
-            # Simulate clicking "Build this" while the popup is open —
-            # _build_plan_for sets the flag before .exec() ever returns.
-            fake_popup.exec.side_effect = (
-                lambda: dlg._build_plan_for(m, key, fake_popup))
-            with mock.patch.object(CB.config, "save_run") as saved:
-                dlg._on_suggested("enlarge the hole")
-        # _on_suggested's own continuation must have taken the "already
-        # built" branch — straight to _next()/_finish(), no second plan
-        # stage queued.
-        self.assertFalse(dlg._built_from_popup, "must be cleared after use")
-        saved.assert_called_once()
-
+        with mock.patch.object(SD, "AutomationWorker", _CaptureWorker), \
+                mock.patch.object(CB.config, "save_run") as saved:
+            dlg._composer_build()
+        stage_key, _tool, _prompts = _CaptureWorker.seen["kwargs"]["custom_stages"][0]
+        self.assertEqual(stage_key, "plan")
+        saved.assert_not_called()
+        self.assertFalse(dlg.composer.send_btn.isEnabled())   # busy
 
 class TheGuardsSpeakBeforeAnythingRuns(unittest.TestCase):
     """Real QMessageBox.warning calls, patched so a headless run does not
@@ -919,7 +910,8 @@ class TheGuardsSpeakBeforeAnythingRuns(unittest.TestCase):
         with mock.patch.object(SD.QMessageBox, "warning") as warn, \
                 mock.patch.object(SD, "StepMeasureWorker") as worker:
             dlg._generate()
-            warn.assert_called_once()
+            warn.assert_not_called()                      # in the window, not a pop-up
+            self.assertIn('Say what you want', dlg.status.text())
             worker.assert_not_called()
 
     def test_draft_needs_no_configured_image_tool(self):
@@ -944,7 +936,8 @@ class TheGuardsSpeakBeforeAnythingRuns(unittest.TestCase):
         with mock.patch.object(SD.QMessageBox, "warning") as warn, \
                 mock.patch.object(SD, "StepMeasureWorker") as worker:
             dlg._generate()
-            warn.assert_called_once()
+            warn.assert_not_called()                      # in the window, not a pop-up
+            self.assertIn('reasoning tool', dlg.status.text())
             worker.assert_not_called()
 
 
@@ -1129,40 +1122,63 @@ class TheWindowRoutesIt(GateTest):
     """The route from the rail to the screen, and from the screen's button
     to the dialog, asserted on a real window -- not by reading source."""
 
-    def test_the_rail_key_lands_on_the_step_screen(self):
+    def test_the_rail_key_lands_on_the_step_workbench(self):
+        """STEP opens straight into its workbench — one screen for everything,
+        not a front door with a window on top of it."""
         import main_window
         self.grant(EVERYTHING)
         win = self._window()
         # The gate itself is a network round trip on a worker thread --
         # tests/test_addon_gates.py proves the gate; this proves the route
         # behind it, so the gate is stepped over here the same way.
-        with mock.patch.object(main_window.MainWindow, "_authorized_then",
-                               lambda self, feature, action, then: then()):
+        with mock.patch.object(CB, "step_available", return_value=(True, "")), \
+                mock.patch.object(main_window.MainWindow, "_authorized_then",
+                                  lambda self, feature, action, then: then()):
             win._handle_command("step")
-        self.assertEqual(win.screens.currentIndex(),
-                         main_window.SCREEN_INDEX["step"])
-        self.assertIs(win.screens.currentWidget(), win.step_panel)
+        self.assertIsNotNone(win.step_work)
+        self.assertEqual(win.screens.currentIndex(), main_window.STEP_WORK)
+        self.assertIs(win.step_work.parentWidget(), win.step_host)
+        self.assertEqual(win.step_work.windowType(), Qt.Widget)
 
-    def test_the_screens_button_opens_the_dialog_when_cadquery_is_there(self):
+    def test_the_screens_button_opens_the_workbench_not_a_window(self):
         import main_window
         self.grant(EVERYTHING)
         win = self._window()
         with mock.patch.object(CB, "step_available", return_value=(True, "")), \
-                mock.patch.object(main_window, "StepDialog") as dlg, \
                 mock.patch.object(main_window.MainWindow,
                                   "_offer_followup_for_dialog") as offered:
             win.step_panel.opened.emit()
-        dlg.assert_called_once_with(win.cfg, win.attachments, win)
-        dlg.return_value.exec.assert_called_once()
+        self.assertEqual(win.screens.currentIndex(), main_window.STEP_WORK)
         # Deliberately NOT offered: that generic follow-up can only ever
         # save a refined TEXT answer, never actually build a file — a
-        # customer hit that dead end twice (here and via History's own
-        # "Follow up" button, the identical code). STEP's own Answer
-        # popup is the one place a follow-up can become a real build now
-        # ("Build this" — tests/test_answer_dialog.py,
-        # BuildThisWorksFromAnyFollowUpEvenReopenedOnes below), so this
-        # door is closed rather than left open and misleading.
+        # customer hit that dead end twice. STEP's own conversation window
+        # is the one place a follow-up can become a real build ("Build
+        # this" — tests/test_answer_dialog.py), so this door stays closed.
         offered.assert_not_called()
+
+    def test_leaving_the_workbench_goes_home(self):
+        import main_window
+        self.grant(EVERYTHING)
+        win = self._window()
+        with mock.patch.object(CB, "step_available", return_value=(True, "")):
+            win._open_step_dialog()
+        win.step_work._close_clicked()
+        self.assertIs(win.screens.currentWidget(), win.home_panel)
+
+    def test_a_step_run_from_history_reopens_in_the_workbench(self):
+        import main_window
+        self.grant(EVERYTHING)
+        win = self._window()
+        path = os.path.join(tempfile.mkdtemp(), "run_1.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"query": "STEP — Ask: x", "responses": {}, "links": {},
+                       "step": {"action": "ask", "mode": "metal",
+                                "question": "x", "models": []}}, f)
+        with mock.patch.object(CB, "step_available", return_value=(True, "")), \
+                mock.patch.object(main_window.MainWindow, "_history_dialog") as hist:
+            win._open_run_record(path)
+        hist.assert_not_called()
+        self.assertEqual(win.screens.currentIndex(), main_window.STEP_WORK)
 
     def test_without_cadquery_it_says_so_and_opens_nothing(self):
         import main_window
@@ -1185,6 +1201,457 @@ class TheWindowRoutesIt(GateTest):
             win._handle_command("step")
         self.assertIn("step", self.paywalled)
         shown.assert_not_called()
+
+
+class TheWorkbenchLayout(unittest.TestCase):
+    """The workbench re-skin (models · canvas + one action · results) moved
+    every widget; these pin what it must still do on screen."""
+
+    def test_the_question_box_belongs_to_ask_and_edit_only(self):
+        dlg = _dialog()
+        dlg._on_files_added(["/nowhere/Assem1.STEP"])
+        self.assertTrue(dlg.ai_draft_cb.isVisibleTo(dlg))          # Draft
+        self.assertFalse(dlg.ask.edit.isVisibleTo(dlg))
+        dlg._action_buttons["ask"].setChecked(True)
+        self.assertTrue(dlg.ask.edit.isVisibleTo(dlg))
+        self.assertTrue(dlg.model_combo.isVisibleTo(dlg))
+        self.assertFalse(dlg.ai_draft_cb.isVisibleTo(dlg))
+        dlg._action_buttons["edit"].setChecked(True)
+        self.assertTrue(dlg.ask.edit.isVisibleTo(dlg))
+
+    def test_the_text_typed_for_a_draft_is_not_lost_by_hiding_the_box(self):
+        dlg = _dialog()
+        dlg._on_files_added(["/nowhere/Assem1.STEP"])
+        dlg._action_buttons["ask"].setChecked(True)
+        dlg.ask.edit.setPlainText("make it lighter")
+        dlg._action_buttons["draft"].setChecked(True)
+        self.assertEqual(dlg.ask.text(), "make it lighter")
+
+    def test_the_canvas_invites_then_waits_then_shows_the_sheet(self):
+        dlg = _dialog()
+        self.assertIs(dlg.canvas.stack.currentWidget(), dlg.canvas.page)
+        self.assertIn("Attach a 3D model", dlg.canvas.card.text())
+        dlg._on_files_added(["/nowhere/Assem1.STEP"])
+        self.assertIn("Assem1.STEP", dlg.canvas.card.text())
+        self.assertIs(dlg.canvas.stack.currentWidget(), dlg.canvas.page)
+        dlg.models = [_fake_measured(dlg)]
+        png = dlg.models[0]["drawn"]["png"]
+        from PySide6.QtGui import QImage
+        img = QImage(40, 30, QImage.Format_RGB32)
+        img.fill(0xFF336699)
+        img.save(png)
+        dlg._show_preview(dlg.models)
+        self.assertIs(dlg.canvas.stack.currentWidget(), dlg.canvas.sheet)
+
+    def test_a_model_with_no_sheet_says_so_on_the_canvas(self):
+        dlg = _dialog()
+        dlg._on_files_added(["/nowhere/block.step"])
+        dlg.models = [_fake_measured(dlg)]
+        dlg.models[0]["path"] = dlg.paths[0]
+        dlg.models[0]["drawn"] = {}
+        dlg._show_preview(dlg.models)
+        self.assertIs(dlg.canvas.stack.currentWidget(), dlg.canvas.page)
+        self.assertIn("No drawing sheet", dlg.canvas.card.text())
+
+    def test_the_files_tab_lists_what_is_on_disk_grouped_by_what_made_them(self):
+        dlg = _dialog()
+        from PySide6.QtWidgets import QLabel
+        dlg._refresh_files()
+        self.assertIn("Nothing made yet.",
+                      [l.text() for l in dlg.files_panel.findChildren(QLabel)])
+        dlg.models = [_fake_measured(dlg)]
+        out = dlg.models[0]["out_dir"]
+        open(os.path.join(out, "block - dimensions.xlsx"), "wb").write(b"x")
+        dlg._refresh_files()
+        texts = " ".join(l.text() for l in dlg.files_panel.findChildren(QLabel))
+        self.assertIn("XLSX", texts)
+        self.assertIn("PNG", texts)
+        self.assertIn("block - dimensions.xlsx", texts)
+        self.assertIn("MEASURED", texts)
+
+    def test_models_are_cards_with_a_status(self):
+        dlg = _dialog()
+        dlg._on_files_added(["/nowhere/Assem1.STEP"])
+        from PySide6.QtWidgets import QLabel
+        texts = [l.text() for l in dlg.model_list.findChildren(QLabel)]
+        self.assertIn("Assem1.STEP", texts)
+        self.assertIn("waiting", texts)
+        self.assertEqual(dlg.models_card.count.text(), "1")
+        dlg.models = [_fake_measured(dlg)]
+        dlg.models[0]["path"] = dlg.paths[0]
+        dlg._render_models()
+        texts = [l.text() for l in dlg.model_list.findChildren(QLabel)]
+        self.assertIn("measured", texts)
+
+    def test_taking_a_model_back_out_clears_its_card(self):
+        dlg = _dialog()
+        dlg._on_files_added(["/nowhere/Assem1.STEP"])
+        dlg.ask.remove_path(dlg.paths[0])
+        self.assertEqual(dlg.paths, [])
+        self.assertEqual(dlg.models_card.count.text(), "0")
+        self.assertIn("Attach a 3D model", dlg.canvas.card.text())
+
+    def test_the_spec_register_reads_the_measurement(self):
+        dlg = _dialog()
+        dlg.models = [_fake_measured(dlg)]
+        dlg._refresh_spec()
+        from PySide6.QtWidgets import QLabel
+        texts = " ".join(l.text() for l in dlg.spec.findChildren(QLabel))
+        self.assertIn("60.0 × 40.0 × 8.0 mm", texts)
+        self.assertIn("Ø5 ×1", texts)
+
+    def test_the_plan_tab_lists_the_proposed_changes(self):
+        dlg = _dialog()
+        from PySide6.QtWidgets import QLabel
+        dlg.plan_panel.set_plan({"changes": [
+            {"op": "enlarge_hole", "part": "p", "dia_mm": 6.5,
+             "new_dia_mm": 8.4, "why": "M8 clearance"}], "advice": ["check fit"]})
+        texts = " ".join(l.text() for l in dlg.plan_panel.findChildren(QLabel))
+        self.assertIn("Ø6.5 → Ø8.4 on p", texts)
+        self.assertIn("M8 clearance", texts)
+        self.assertIn("check fit", texts)
+
+    def test_options_are_a_popover_off_the_top_bar(self):
+        dlg = _dialog()
+        self.assertTrue(dlg.opt_box.isHidden())
+        self.assertIn("▾", dlg.opt_toggle.text())
+        for w in (dlg.mode_combo, dlg.k_edit, dlg.root_label):
+            self.assertIs(w.window(), dlg.opt_box)
+
+    def test_a_finished_ask_opens_the_answer_tab_and_a_measure_the_numbers(self):
+        dlg = _dialog()
+        dlg.models = [_fake_measured(dlg)]
+        dlg._action_buttons["ask"].setChecked(True)
+        with mock.patch.object(SD.CB.config, "save_run"):
+            dlg._finish()
+        self.assertEqual(dlg.out_stack.currentIndex(), 1)
+
+
+class ReopeningARunFromHistory(unittest.TestCase):
+    """History lives in the STEP screen: click a past run and it reopens
+    there — no other window."""
+
+    def _record(self, dlg, with_report=True, model_exists=False):
+        out = os.path.join(dlg._root(), "block")
+        os.makedirs(out, exist_ok=True)
+        m = _fake_measured(dlg)
+        model = os.path.join(dlg._root(), "block.step")
+        if model_exists:
+            open(model, "wb").write(b"x")
+        rm = {"file": "block.step", "path": model if with_report else "",
+              "out_dir": m["out_dir"], "modified": "", "conversation": ""}
+        if with_report:
+            rm["report"] = {k: v for k, v in m["report"].items()}
+        rec = {"query": "STEP — Ask: lighter?", "links": {},
+               "responses": {"ask · block": ["Use thinner stock."]},
+               "step": {"action": "ask", "mode": "plastic",
+                        "question": "lighter?", "models": [rm]}}
+        path = os.path.join(dlg._root(), "run_1.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(rec, f)
+        return path
+
+    def test_the_history_is_one_row_per_chat_not_per_run(self):
+        dlg = _dialog()
+        def rec(action, q, model, modified=""):
+            return {"step": {"action": action, "question": q, "models": [
+                {"file": model, "path": "", "out_dir": "/x", "modified": modified}]},
+                "responses": {}, "links": {}}
+        recs = [
+            {"path": "/r/1.json", "stamp": 100, "when": "1d ago", "rec": rec("draft", "", "A.step")},
+            {"path": "/r/2.json", "stamp": 200, "when": "1d ago", "rec": rec("ask", "lighter?", "A.step")},
+            {"path": "/r/3.json", "stamp": 300, "when": "1h ago",
+             "rec": rec("edit", "bigger holes", "A.step", "/x/A - modified 2026-10-15 201121.step")},
+            {"path": "/r/4.json", "stamp": 400, "when": "5m ago",
+             "rec": rec("ask", "again", "A - modified 2026-10-15 201121.step")},
+            {"path": "/r/5.json", "stamp": 50, "when": "3d ago", "rec": rec("draft", "", "B.step")},
+        ]
+        with mock.patch.object(dlg, "_records", return_value=recs):
+            items = dlg._step_runs()
+        self.assertEqual([i["text"] for i in items], ["A", "B"])
+        self.assertIn("4 runs", items[0]["when"])
+        self.assertEqual(items[0]["action"], "Ask")
+
+    def test_a_run_reopens_its_question_answer_and_model(self):
+        dlg = _dialog()
+        path = self._record(dlg, with_report=True, model_exists=True)
+        dlg.load_run(path)
+        self.assertEqual(dlg._action(), "ask")
+        self.assertEqual(dlg.ask.text(), "lighter?")
+        self.assertIn("Use thinner stock.", dlg.result.toPlainText())
+        self.assertEqual(len(dlg.models), 1)
+        self.assertEqual(len(dlg.paths), 1)
+        self.assertTrue(dlg.generate_btn.isEnabled())
+        self.assertEqual(dlg.out_stack.currentIndex(), 1)
+        self.assertFalse(dlg.step2.isHidden())
+
+    def test_a_run_whose_model_is_gone_still_shows_its_answer_but_cannot_rerun(self):
+        dlg = _dialog()
+        path = self._record(dlg, with_report=False)
+        dlg.load_run(path)
+        self.assertIn("Use thinner stock.", dlg.result.toPlainText())
+        self.assertEqual(dlg.paths, [])
+        self.assertFalse(dlg.generate_btn.isEnabled())
+        from PySide6.QtWidgets import QLabel
+        texts = " ".join(l.text() for l in dlg.spec.findChildren(QLabel))
+        self.assertIn("was not kept", texts)
+        shown = [l.text() for l in dlg.model_list.findChildren(QLabel)]
+        self.assertIn("block.step", shown)
+
+    def test_a_reopened_model_card_can_be_dismissed(self):
+        dlg = _dialog()
+        dlg.load_run(self._record(dlg, with_report=False))
+        dlg._remove_model("run:" + dlg.models[0]["out_dir"])
+        self.assertEqual(dlg.models, [])
+
+    def test_a_run_is_not_reopened_over_one_that_is_still_going(self):
+        dlg = _dialog()
+        path = self._record(dlg, with_report=True)
+        dlg._busy = True
+        dlg.load_run(path)
+        self.assertEqual(dlg.models, [])
+        self.assertIn("still going", dlg.status.text())
+
+    def test_the_follow_up_box_needs_a_kept_measurement(self):
+        dlg = _dialog()
+        dlg.load_run(self._record(dlg, with_report=False))
+        self.assertFalse(dlg.composer.isVisibleTo(dlg))
+    def test_a_reopened_run_offers_the_follow_up_box_in_the_chat(self):
+        dlg = _dialog()
+        dlg.load_run(self._record(dlg, with_report=True, model_exists=True))
+        self.assertTrue(dlg.composer.isVisibleTo(dlg))
+        # and a follow-up goes to the same run record, not a new one
+        self.assertTrue(dlg._run_path.endswith("run_1.json"))
+    def test_it_can_be_the_screen_and_ask_the_main_window_to_leave(self):
+        from PySide6.QtWidgets import QWidget
+        host = QWidget()
+        dlg = StepDialog({"step_out_dir": tempfile.mkdtemp()}, [], host,
+                         embedded=True)
+        got = []
+        dlg.leave_requested.connect(lambda: got.append(1))
+        dlg._close_clicked()
+        self.assertEqual(got, [1])
+        self.assertEqual(dlg.windowType(), Qt.Widget)
+        self.assertFalse(dlg.isModal())
+
+
+class AChatStartsEmptyWhenAFileIsAttached(unittest.TestCase):
+    """A chat starts when a file is attached — empty, whatever was done with
+    that file before — and counts what is done in it: 0, then 1, then 1+n.
+    A different file is a new chat; an old one is reopened from History."""
+
+    def _record(self, stamp, action, model, chat):
+        return {"path": f"/r/{stamp}.json", "stamp": stamp, "when": "x",
+                "rec": {"step": {"action": action, "question": "q", "chat": chat,
+                        "models": [{"file": model, "path": "", "out_dir": "/x"}]},
+                        "responses": {}}}
+
+    def _tab(self, dlg):
+        return dlg.out_tabs._buttons[1].text()
+
+    def test_a_freshly_attached_file_shows_zero_chats_even_if_it_has_history(self):
+        dlg = _dialog()
+        old = [self._record(1, "draft", "A.step", "old"),
+               self._record(2, "ask", "A.step", "old")]
+        with mock.patch.object(dlg, "_records", return_value=old):
+            dlg._on_files_added(["/nowhere/A.step"])
+        self.assertEqual(self._tab(dlg), "Chat  0")
+        self.assertEqual(len(dlg.chat.cards), 0)
+        self.assertNotEqual(dlg._session_key, "old")
+
+    def test_the_count_grows_as_things_are_done_in_it(self):
+        dlg = _dialog()
+        recs = []
+        with mock.patch.object(dlg, "_records", side_effect=lambda: list(recs)):
+            dlg._on_files_added(["/nowhere/A.step"])
+            self.assertEqual(self._tab(dlg), "Chat  0")
+            recs.append(self._record(1, "draft", "A.step", dlg._session_key))
+            dlg._refresh_chat()
+            self.assertEqual(self._tab(dlg), "Chat  1")
+            recs.append(self._record(2, "ask", "A.step", dlg._session_key))
+            dlg._refresh_chat()
+            self.assertEqual(self._tab(dlg), "Chat  2")
+
+    def test_a_new_file_after_working_starts_a_new_empty_chat(self):
+        dlg = _dialog()
+        recs = []
+        with mock.patch.object(dlg, "_records", side_effect=lambda: list(recs)):
+            dlg._on_files_added(["/nowhere/A.step"])
+            first = dlg._session_key
+            recs.append(self._record(1, "draft", "A.step", first))
+            dlg._refresh_chat()
+            dlg._on_files_added(["/nowhere/B.step"])
+            self.assertNotEqual(dlg._session_key, first)
+            self.assertEqual(self._tab(dlg), "Chat  0")
+            self.assertEqual([os.path.basename(p) for p in dlg.paths], ["B.step"])
+
+    def test_files_added_before_anything_is_run_share_one_chat(self):
+        dlg = _dialog()
+        with mock.patch.object(dlg, "_records", return_value=[]):
+            dlg._on_files_added(["/nowhere/A.step"])
+            first = dlg._session_key
+            dlg._on_files_added(["/nowhere/B.step"])
+        self.assertEqual(dlg._session_key, first)
+        self.assertEqual(len(dlg.paths), 2)
+
+    def test_taking_every_file_away_ends_the_chat(self):
+        dlg = _dialog()
+        with mock.patch.object(dlg, "_records", return_value=[]):
+            dlg._on_files_added(["/nowhere/A.step"])
+            dlg.ask.remove_path(dlg.paths[0])
+        self.assertEqual(dlg._session_key, "")
+        self.assertEqual(self._tab(dlg), "Chat  0")
+
+    def test_an_old_chat_reopened_from_history_is_carried_on_in(self):
+        dlg = _dialog()
+        old = [self._record(1, "draft", "A.step", "old"),
+               self._record(2, "ask", "A.step", "old")]
+        with mock.patch.object(dlg, "_records", return_value=old):
+            dlg.load_session("old")
+        self.assertEqual(dlg._session_key, "old")
+        self.assertEqual(self._tab(dlg), "Chat  2")
+
+    def test_no_file_open_means_no_chat(self):
+        dlg = _dialog()
+        with mock.patch.object(dlg, "_records", return_value=[]):
+            dlg._refresh_chat()
+        self.assertEqual(dlg._session_key, "")
+        self.assertEqual(len(dlg.chat.cards), 0)
+
+
+class AChatAboutSeveralPartsHasNoSingleOriginal(unittest.TestCase):
+    """Found live: files attached together share one chat, and picking one
+    model card then narrowed the screen to that one file and dropped the
+    other. Original / edited-copy choices belong to a chat about ONE part."""
+
+    def test_two_parts_in_one_chat_offer_no_version_picker(self):
+        from addons.step import sessions as S
+        runs = []
+        for i, name in enumerate(("A.step", "B.step")):
+            runs.append({"path": f"/r/{i}", "stamp": i, "rec": {"step": {
+                "action": "draft", "chat": "c",
+                "models": [{"file": name, "path": f"/x/{name}", "out_dir": "/x",
+                            "modified": ""}]}, "responses": {}}})
+        sess = S.build_sessions(runs)[0]
+        with mock.patch("os.path.exists", return_value=True):
+            self.assertEqual(len(S.versions_of(sess)), 2)
+            self.assertEqual(StepDialog._single_part_versions(sess), [])
+
+    def test_one_part_and_its_edit_still_offer_both(self):
+        from addons.step import sessions as S
+        runs = [{"path": "/r/0", "stamp": 0, "rec": {"step": {
+            "action": "edit", "chat": "c", "models": [{
+                "file": "A.step", "path": "/x/A.step", "out_dir": "/x",
+                "modified": "/x/A - modified 2026-10-15 201121.step"}]},
+            "responses": {}}}]
+        sess = S.build_sessions(runs)[0]
+        with mock.patch("os.path.exists", return_value=True):
+            self.assertEqual(len(StepDialog._single_part_versions(sess)), 2)
+
+
+class DeletingFromTheSidebar(unittest.TestCase):
+    """The trash on a History chat removes its run records; the trash on a
+    model removes the folder Prism made for it. Both ask first, and neither
+    can reach a file outside what Prism itself made."""
+
+    def _rec(self, stamp, chat, out_dir="/x"):
+        return {"path": f"/r/run_{stamp}.json", "stamp": stamp, "when": "x",
+                "rec": {"step": {"action": "ask", "question": "q", "chat": chat,
+                        "models": [{"file": "A.step", "path": "", "out_dir": out_dir}]},
+                        "responses": {}}}
+
+    def test_a_styled_copy_is_named_on_the_draft_card(self):
+        dlg = _dialog()
+        styled = os.path.join(dlg._root(), "A - AI drawing sheet 1.png")
+        turn = SES.live_turn("draft", "A.step", "")
+        turn["styled"] = [styled]
+        dlg.chat.set_turns([turn])
+        card = dlg.chat.cards[0]
+        names = [l.text() for l in card.findChildren(SD.QLabel)]
+        self.assertIn("A - AI drawing sheet 1.png", names)
+        self.assertIn("STYLED COPY", names)
+
+    def test_a_cancelled_chat_delete_removes_nothing(self):
+        dlg = _dialog()
+        recs = [self._rec(1, "old"), self._rec(2, "old")]
+        with mock.patch.object(dlg, "_records", return_value=recs), \
+                mock.patch.object(dlg, "_confirm", return_value=False), \
+                mock.patch.object(SD.DATA, "delete_runs") as gone:
+            dlg._delete_chat("old")
+        gone.assert_not_called()
+
+    def test_a_confirmed_chat_delete_removes_exactly_its_run_records(self):
+        dlg = _dialog()
+        recs = [self._rec(1, "old"), self._rec(2, "old"), self._rec(3, "other")]
+        with mock.patch.object(dlg, "_records", return_value=recs), \
+                mock.patch.object(dlg, "_confirm", return_value=True) as ask, \
+                mock.patch.object(SD.DATA, "delete_runs",
+                                  return_value=(2, [])) as gone:
+            dlg._delete_chat("old")
+        self.assertEqual(sorted(gone.call_args[0][1]),
+                         ["/r/run_1.json", "/r/run_2.json"])
+        self.assertIn("stay where they are", ask.call_args[0][1])
+
+    def test_deleting_the_open_chat_empties_the_screen(self):
+        dlg = _dialog()
+        recs = [self._rec(1, "old")]
+        with mock.patch.object(dlg, "_records", return_value=recs):
+            dlg.load_session("old")
+        self.assertEqual(dlg._session_key, "old")
+        with mock.patch.object(dlg, "_records", return_value=[]), \
+                mock.patch.object(dlg, "_confirm", return_value=True), \
+                mock.patch.object(dlg, "_sessions",
+                                  return_value=SES.build_sessions(recs)), \
+                mock.patch.object(SD.DATA, "delete_runs", return_value=(1, [])):
+            dlg._delete_chat("old")
+        self.assertEqual(dlg._session_key, "")
+        self.assertEqual(len(dlg.chat.cards), 0)
+
+    def test_a_model_folder_inside_the_step_folder_is_deleted_after_confirming(self):
+        dlg = _dialog()
+        m = _fake_measured(dlg)
+        dlg.models = [m]
+        dlg.paths = []
+        folder = m["out_dir"]
+        self.assertTrue(os.path.isdir(folder))
+        with mock.patch.object(dlg, "_confirm", return_value=False):
+            dlg._delete_model_files("run:" + folder)
+        self.assertTrue(os.path.isdir(folder), "cancel must keep everything")
+        with mock.patch.object(dlg, "_confirm", return_value=True):
+            dlg._delete_model_files("run:" + folder)
+        self.assertFalse(os.path.exists(folder))
+        self.assertEqual(dlg.models, [])
+
+    def test_a_folder_outside_the_step_folder_is_never_deleted(self):
+        dlg = _dialog()
+        outside = tempfile.mkdtemp(prefix="prism-test-outside-")
+        keep = os.path.join(outside, "important.txt")
+        open(keep, "w").write("x")
+        m = _fake_measured(dlg, out_dir=outside)
+        dlg.models = [m]
+        with mock.patch.object(dlg, "_confirm", return_value=True) as ask:
+            dlg._delete_model_files("run:" + outside)
+        ask.assert_not_called()
+        self.assertTrue(os.path.exists(keep))
+        self.assertIn("only delete", dlg.status.text())
+
+    def test_the_step_folder_itself_and_a_nested_folder_are_refused(self):
+        dlg = _dialog()
+        nested = os.path.join(dlg._root(), "a", "b")
+        os.makedirs(nested)
+        self.assertEqual(dlg._safe_model_dir(dlg._root()), "")
+        self.assertEqual(dlg._safe_model_dir(nested), "")
+        self.assertNotEqual(
+            dlg._safe_model_dir(os.path.join(dlg._root(), "a")), "")
+
+    def test_the_folder_holding_an_attached_original_is_refused(self):
+        dlg = _dialog()
+        folder = os.path.join(dlg._root(), "mine")
+        os.makedirs(folder)
+        step = os.path.join(folder, "mine.step")
+        open(step, "w").write("x")
+        dlg.paths = [step]
+        self.assertEqual(dlg._safe_model_dir(folder), "")
 
 
 if __name__ == "__main__":

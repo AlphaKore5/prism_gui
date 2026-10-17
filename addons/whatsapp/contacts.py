@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (QFrame, QListWidget, QListWidgetItem,
                                QWidget)
 
 import i18n
+from widgets.loader import Skeleton
 import theme
 from addons.whatsapp.chat import CONTACT_ROW_H, ContactDelegate
 from addons.whatsapp.contact_panel import ContactPanel
@@ -79,6 +80,8 @@ class ContactsPage(QWidget):
         self.list.setStyleSheet("QListWidget { background: transparent; border: none; outline: 0; }")
         self.list.currentItemChanged.connect(self._on_selected)
         self.stack.addWidget(self.list)
+        self.loading = Skeleton(5)
+        self.stack.addWidget(self.loading)
         self.empty = C.EmptyState("user", i18n.t("No contacts yet"),
                                   i18n.t("People are added automatically the first time "
                                          "they message your number."))
@@ -121,6 +124,9 @@ class ContactsPage(QWidget):
         if not self._sticky:
             self.status.setText(i18n.t("Loading…"))
             self.status.setStyleSheet(f"color: {theme.NEUTRAL[500]};")
+            if not self._rows:
+                self.loading.setVisible(True)
+                self.stack.setCurrentWidget(self.loading)
         w = ContactsLoadWorker(search=self.search.text().strip())
         w.done.connect(self._on_loaded)
         w.failed.connect(self._on_failed)
@@ -128,6 +134,7 @@ class ContactsPage(QWidget):
         w.start()
 
     def _on_failed(self, error: str):
+        self.loading.setVisible(False)
         self.status.setText(i18n.t("Couldn't load contacts — {e}").format(e=error))
         self.status.setStyleSheet(f"color: {theme.ERR_INK};")
         if not self._rows:
@@ -135,6 +142,7 @@ class ContactsPage(QWidget):
             self.stack.setCurrentIndex(1)
 
     def _on_loaded(self, rows: list):
+        self.loading.setVisible(False)
         self._loaded = True
         self._rows = rows or []
         self.countChanged.emit(len(self._rows))

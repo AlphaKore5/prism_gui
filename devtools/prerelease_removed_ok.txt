@@ -1,0 +1,17 @@
+
+# STEP became one embedded workbench (2026-10-15/16): the pop-up plan review
+# is the Plan tab with a Build bar, and the pop-up follow-up flows are the
+# inline composer in the Chat tab. The tests below were replaced by
+# tests/test_step_dialog.py::TheWorkbench*, AChatStartsEmpty*, DeletingFromTheSidebar
+# and friends, which keep the same intent (build once, never advance the queue
+# twice, only offer Build for an Edit, the rail key lands on the STEP screen).
+addons/step/dialog.py::PlanReviewDialog
+addons/step/dialog.py::PlanReviewDialog.__init__
+addons/step/dialog.py::PlanReviewDialog._open_file
+tests/test_step_dialog.py::BuildThisWorksFromAnyFollowUpEvenReopenedOnes.test_build_this_clicked_inside_the_first_popup_is_not_built_twice
+tests/test_step_dialog.py::BuildThisWorksFromAnyFollowUpEvenReopenedOnes.test_on_planned_from_a_popup_opens_the_review_but_never_advances_the_queue
+tests/test_step_dialog.py::BuildThisWorksFromAnyFollowUpEvenReopenedOnes.test_the_automatic_first_build_still_advances_the_queue_exactly_once
+tests/test_step_dialog.py::BuildThisWorksFromAnyFollowUpEvenReopenedOnes.test_the_button_only_exists_when_the_action_was_edit
+tests/test_step_dialog.py::TheConversationIsSavedToOneFilePerModel.test_on_suggested_seeds_the_popup_from_the_saved_file
+tests/test_step_dialog.py::TheWindowRoutesIt.test_the_rail_key_lands_on_the_step_screen
+tests/test_step_dialog.py::TheWindowRoutesIt.test_the_screens_button_opens_the_dialog_when_cadquery_is_there

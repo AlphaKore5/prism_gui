@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 )
 
 import i18n
+from widgets.loader import Loader
 import paths
 import theme
 from widgets import icons
@@ -971,7 +972,9 @@ class RunHeader(Card):
             theme.type_css("META") + " background: transparent;")
         col.addWidget(self.counts)
 
-        self.progress = C.ProgressBar(0.0)
+        # One segment per step: finished ones filled, the live one moving.
+        self.progress = Loader("stages", bare=True)
+        self.progress.setVisible(True)
         col.addWidget(self.progress)
 
     def set_task(self, text: str):
@@ -1523,8 +1526,9 @@ class OutputPanel(QWidget):
             bits.append(i18n.t("{t} elapsed").format(t=short_duration(span)))
         self.header.counts.setText(" · ".join(bits))
         self.header.counts.setVisible(bool(bits))
-        self.header.progress.set_fraction(
-            (tally["finished"] / total) if total else 0.0)
+        self.header.progress.setRange(0, total)
+        self.header.progress.setValue(tally["finished"])
+        self.header.progress.set_active(state == "running")
         QTimer.singleShot(0, self._share_slack)
 
     def _on_card_state(self):

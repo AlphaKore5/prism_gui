@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 
 import i18n
 import theme
+from widgets.loader import Loader
 from dialogs.base import PrismDialog
 from integrations import gdrive
 from widgets import controls as C
@@ -80,6 +81,11 @@ class DriveDialog(PrismDialog):
         # between the three states this dialog moves through.
         self.body.setSpacing(theme.SPACE_3)
 
+        # In the footer, which survives the body being rebuilt between states:
+        # the ring and its clock, with what Drive is being asked beside it.
+        self.loader = Loader("ring", compact=True)
+        self.loader.setVisible(False)
+        self.footer.add_note(self.loader)
         self.status = meta("")
         self.footer.add_note(self.status)
         self.footer.add_secondary(
@@ -176,14 +182,18 @@ class DriveDialog(PrismDialog):
         if self._job is not None and self._job.isRunning():
             return
         if not quiet:
-            self.status.setText("Talking to Google Drive…")
+            if not self.status.text():
+                self.status.setText("Talking to Google Drive…")
+            self.loader.setVisible(True)
         self._job = _Job(fn, *args, **kwargs)
         self._job.done.connect(on_done)
-        self._job.done.connect(lambda _=None: self.status.setText(""))
+        self._job.done.connect(lambda _=None: (self.status.setText(""),
+                                               self.loader.setVisible(False)))
         self._job.failed.connect(self._failed)
         self._job.start()
 
     def _failed(self, error: str):
+        self.loader.setVisible(False)
         self.status.setText("")
         QMessageBox.warning(self, "Google Drive", error)
 

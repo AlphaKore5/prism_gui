@@ -20,7 +20,7 @@ from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox, QDialog, QFrame, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel,
-    QPushButton, QPlainTextEdit, QMessageBox, QProgressBar,
+    QPushButton, QPlainTextEdit, QMessageBox,
 )
 
 import core_bridge as CB
@@ -29,6 +29,7 @@ import theme
 from dialogs.base import PrismDialog
 from workers import AutomationWorker, GerberCleanWorker, GerberWorker
 from widgets import icons
+from widgets.loader import Loader
 from widgets.ask_panel import AskPanel
 
 # Every other add-on's numbers land in the hidden ~/.prism/runs folder, which
@@ -193,7 +194,7 @@ class GerberDialog(PrismDialog):
         self.meas_box.setVisible(False)
         root.addWidget(self.meas_box, stretch=1)
 
-        self.progress = QProgressBar()
+        self.progress = Loader("stages", [i18n.t(n) for n in ['Read', 'Measure', 'Write']])
         self.progress.setRange(0, 0)
         self.progress.setVisible(False)
         root.addWidget(self.progress)
@@ -362,6 +363,7 @@ class GerberDialog(PrismDialog):
                 pass
         prompt = gform.ai_fill_prompt(fill_result.get("filled") or [],
                                       blanks, self.ask.text().strip())
+        self.progress.set_stage(0)
         self._set_busy(True, i18n.t(
             "{agent} is reading your documents — the Gerber files are NOT "
             "attached, only these documents and the blank field list."
@@ -580,6 +582,7 @@ class GerberDialog(PrismDialog):
         if not self.paths:
             return
         self.meas_view.clear()
+        self.progress.set_stage(1)
         self._set_busy(True, "Measuring — the design never leaves this "
                              "machine, and a dense multilayer board can "
                              "take a few minutes…")
@@ -681,6 +684,7 @@ class GerberDialog(PrismDialog):
         brief = self.gerber.agent_brief(
             job, context, unit=self.cfg.get("gerber_units") or "mm")
 
+        self.progress.set_stage(2)
         self._set_busy(True, f"{agents[writer]} is writing this up — only "
                              "the numbers above were shown to it…")
         # attachments=[] is not a default being left alone — it is the
@@ -731,6 +735,7 @@ class GerberDialog(PrismDialog):
         self._clean_stem = stem
         out_dir = os.path.join(REPORTS_DIR,
                                f"{stem} cleaned {time.strftime('%Y-%m-%d %H%M')}")
+        self.progress.set_stage(1)
         self._set_busy(True, "Cleaning outside the border — nothing leaves "
                              "this machine…")
         self.clean_btn.setEnabled(False)
@@ -774,10 +779,12 @@ class GerberDialog(PrismDialog):
         QMessageBox.warning(self, "Gerber", error)
 
     def _set_busy(self, busy: bool, message: str):
+        if busy:
+            self.progress.set_message(message)
         self.progress.setVisible(busy)
         self.generate_btn.setEnabled(not busy and bool(self.paths))
         self.run_btn.setEnabled(not busy and bool(self.jobs))
-        self.status.setText(message)
+        self.status.setText("" if busy else message)   # the loader carries it while busy
 
     def closeEvent(self, event):
         """Same reasoning as BoqDialog: a QThread destroyed mid-run aborts

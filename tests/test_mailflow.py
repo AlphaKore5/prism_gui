@@ -1258,6 +1258,24 @@ class TheDailyLoop(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertTrue(os.path.isdir(rows[0]["Folder"]))
 
+    def test_progress_is_reported_per_mail_and_a_bad_callback_never_stops_the_check(self):
+        k = triage.Knowledge(customers={"shaktiauto.in"})
+        seen = []
+        mails = [message(), message(subject="Another enquiry",
+                                    headers={"Message-ID": "<a2@shaktiauto.in>"})]
+        result = self._run(mails, knowledge=k,
+                           progress=lambda *a: seen.append(a))
+        self.assertEqual(seen[0], ("fetch", 0, 0))
+        self.assertIn(("sort", 0, 2), seen)
+        self.assertEqual([x for x in seen if x[0] == "file"],
+                         [("file", 1, 2), ("file", 2, 2)])
+        self.assertTrue(result.new_inquiries)
+
+        def broken(*_a):
+            raise RuntimeError("the screen went away")
+        again = self._run([message()], knowledge=k, progress=broken)
+        self.assertEqual(again.error, "")
+
     def test_attachments_land_in_that_folder(self):
         k = triage.Knowledge(customers={"shaktiauto.in"})
         result = self._run([message(attachments=[

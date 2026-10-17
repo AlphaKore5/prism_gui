@@ -20,7 +20,7 @@ from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QDialog, QFrame, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QPlainTextEdit, QMessageBox, QProgressBar, QRadioButton, QButtonGroup,
+    QPlainTextEdit, QMessageBox, QRadioButton, QButtonGroup,
     QCheckBox,
 )
 
@@ -32,6 +32,7 @@ from dialogs.base import PrismDialog
 from widgets import controls as C
 from workers import (AutomationWorker, RecordWorker, ReelWorker,
                      StudioFollowupWorker)
+from widgets.loader import Loader
 from widgets.ask_panel import AskPanel
 
 
@@ -196,7 +197,7 @@ class ReelDialog(PrismDialog):
             f" font-size: 13px;")
         root.addWidget(self.brand_label)
 
-        self.progress = QProgressBar()
+        self.progress = Loader("stages", [i18n.t(n) for n in ['Write', 'Design', 'Render']])
         self.progress.setVisible(False)
         root.addWidget(self.progress)
 
@@ -360,6 +361,7 @@ class ReelDialog(PrismDialog):
             self._run_studio(request, agents, writer)
             return
 
+        self.progress.set_stage(0)
         self._busy(True, f"{agents[writer]} is writing the scenes…")
         prompt = self.reel.build_prompt(request, self.brand, bool(self.images))
         self._worker = AutomationWorker(
@@ -443,6 +445,7 @@ class ReelDialog(PrismDialog):
         stages.append(("media", "Prism Studio", []))
 
         self.progress.setRange(0, 0)
+        self.progress.set_stage(0)
         self._busy(True, f"{agents[writer_stage]} is writing timed motion captions…")
         self._worker = AutomationWorker(
             {}, self.cfg, video_attachments,
@@ -456,11 +459,13 @@ class ReelDialog(PrismDialog):
     def _on_footage_event(self, kind: str, payload: dict):
         stage = payload.get("stage", "")
         if kind == "stage_start" and stage == "audio":
+            self.progress.set_stage(1)
             self._busy(True, "ElevenLabs is creating the voice-over…")
         elif kind == "stage_start" and stage == "media":
             detail = ("motion captions, dynamic transitions, and ducked voice-over"
                       if self.voiceover_check.isChecked()
                       else "motion captions and dynamic transitions")
+            self.progress.set_stage(1)
             self._busy(True, f"Editing the clips — adding {detail}…")
         elif kind == "local_progress":
             self._on_footage_progress(int(payload.get("done", 0)),
@@ -509,6 +514,7 @@ class ReelDialog(PrismDialog):
         # harder of the two by a distance.
         director = agents.get("brains") or agents.get("content") or agents[writer]
         self._studio_director = director
+        self.progress.set_stage(0)
         self._busy(True, f"{agents[writer]} is writing the words…")
 
         stages = [
@@ -557,16 +563,20 @@ class ReelDialog(PrismDialog):
         stage = payload.get("stage", "")
         if kind == "reel_scene":
             n, total = payload.get("index", 0) + 1, payload.get("total", 0)
+            self.progress.set_stage(1)
             self._busy(True, f"Designing scene {n} of {total} — "
                              "each one is written and laid out on its own.")
             if total:
                 self.progress.setRange(0, total)
                 self.progress.setValue(n - 1)
         elif kind == "stage_start" and stage == "artwork":
+            self.progress.set_stage(1)
             self._busy(True, "Generating artwork and visual assets…")
         elif kind == "stage_start" and stage == "audio":
+            self.progress.set_stage(1)
             self._busy(True, "Creating voice-over audio…")
         elif kind == "stage_start" and stage == "design":
+            self.progress.set_stage(1)
             self._busy(True, "Choosing the look and storyboarding the "
                              "scenes…")
 
@@ -649,6 +659,7 @@ class ReelDialog(PrismDialog):
             indent=2)
 
         self.progress.setRange(0, 100)
+        self.progress.set_stage(2)
         self._busy(True, f"{'Filming' if studio else 'Drawing'} "
                          f"{len(spec['scenes'])} scenes, {secs:.0f}s, "
                          "1080x1920…")
@@ -774,6 +785,7 @@ class ReelDialog(PrismDialog):
             self._auto_healed = True
             try:
                 self.spec = CB.get_studio().ensure_accent_applied(self.spec)
+                self.progress.set_stage(2)
                 self._busy(True, "Auto-healing brand colours and re-filming…")
                 self._start_render(self.spec, studio=True)
                 return
@@ -786,6 +798,8 @@ class ReelDialog(PrismDialog):
         QMessageBox.warning(self, "Reel", error)
 
     def _busy(self, busy: bool, message: str):
+        if busy:
+            self.progress.set_message(message)
         self.progress.setVisible(busy)
         if busy and self.progress.maximum() == 0:
             self.progress.setRange(0, 0)
@@ -794,7 +808,7 @@ class ReelDialog(PrismDialog):
             self.edit_btn.setEnabled(False)
         else:
             self._refresh_edit_btn()
-        self.status.setText(message)
+        self.status.setText("" if busy else message)   # the loader carries it while busy
 
     # ── the browser layout editor ───────────────────────────────────────
     @staticmethod
@@ -887,6 +901,7 @@ class ReelDialog(PrismDialog):
             target += f", selected layer {selection.get('label') or selection['element_id']}"
         contextual_change = f"{change}\n\nSTUDIO SELECTION: {target}."
         self._stop_editor()
+        self.progress.set_stage(0)
         self._busy(True, "Reopening the design conversation for the selected layer…")
         self._followup_worker = StudioFollowupWorker(
             self.cfg, self.spec, agent, design_url, contextual_change,

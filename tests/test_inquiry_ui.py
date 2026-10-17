@@ -3808,5 +3808,25 @@ class PickedRowsShowOnTintedRows(unittest.TestCase):
                                 100)
 
 
+class TheCheckShowsARealCount(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.dialog = UI.InquiryDialog(ready_cfg(self.folder))
+        self.dialog._queue = [{"address": "a@x.in"}]
+        self.dialog._queue_pos = 0
+
+    def test_filing_fills_the_ring_and_says_which_mail(self):
+        self.dialog._on_check_progress("file", 43, 75)
+        self.assertEqual(self.dialog.progress.maximum(), 75)
+        self.assertEqual(self.dialog.progress.value(), 43)
+        self.assertIn("43 of 75", self.dialog.status.text())
+
+    def test_sorting_names_how_many_and_an_empty_inbox_says_so(self):
+        self.dialog._on_check_progress("sort", 0, 12)
+        self.assertIn("12", self.dialog.status.text())
+        self.dialog._on_check_progress("sort", 0, 0)
+        self.assertIn("No new mail", self.dialog.status.text())
+
+
 if __name__ == "__main__":
     unittest.main()

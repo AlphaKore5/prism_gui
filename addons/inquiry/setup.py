@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 
 import core_bridge as CB
 import i18n
+from widgets.loader import busy_button
 from dialogs.base import PrismDialog
 import theme
 from widgets import controls as C
@@ -648,13 +649,13 @@ class InquirySetupDialog(PrismDialog):
             self._set_test_state(
                 i18n.t("Enter the address and password first."), "err")
             return
-        self.test_btn.setEnabled(False)
+        busy_button(self.test_btn, True, i18n.t("Testing"))
         self._set_test_state(
             i18n.t("Testing {host}…").replace("{host}", typed_host)
             if typed_host else i18n.t("Checking your mailbox…"), "busy")
 
         def finished(settings: dict, error: str):
-            self.test_btn.setEnabled(True)
+            busy_button(self.test_btn, False)
             if error:
                 self._tested_ok = False
                 self._set_test_state(error, "err")

@@ -41,6 +41,7 @@ from PySide6.QtWidgets import (
 
 import core_bridge as CB
 import i18n
+from widgets.loader import Loader
 import theme
 from dialogs.base import PrismDialog
 from widgets import controls as C
@@ -1097,6 +1098,10 @@ class LeadsWorkbench(QWidget):
         nl = QHBoxLayout(self._notice)
         nl.setContentsMargins(theme.SPACE_4, theme.SPACE_2, theme.SPACE_4, theme.SPACE_2)
         nl.setSpacing(theme.SPACE_4)
+        # Something is running: the ring and its clock, beside the words.
+        self._busy_ring = Loader("ring", compact=True)
+        self._busy_ring.setVisible(False)
+        nl.addWidget(self._busy_ring)
         self._status = _Line("SUPPORT", on_change=self._sync_notice,
                              ink=theme.TEXT, weight=600)
         self._summary = _Line("SUPPORT", on_change=self._sync_notice)
@@ -3203,6 +3208,9 @@ class LeadsWorkbench(QWidget):
             return ""
 
     def _set_running(self, running: bool, sending: bool = False):
+        ring = getattr(self, "_busy_ring", None)
+        if ring is not None:
+            ring.setVisible(running)
         # The FILTERS stay usable: a running search took its filters when it
         # started, and browsing the people Prism holds costs nothing — Apollo
         # never locks its rail either.

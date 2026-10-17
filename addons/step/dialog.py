@@ -27,23 +27,30 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
+import uuid
 
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QButtonGroup, QCheckBox, QComboBox, QFileDialog, QFrame, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
-    QProgressBar, QRadioButton, QTextBrowser, QVBoxLayout, QWidget,
+    QPushButton, QScrollArea, QStackedWidget, QTextBrowser,
+    QVBoxLayout, QWidget,
 )
 
 import core_bridge as CB
+import dashboard_data as DATA
 import i18n
 import theme
-from dialogs.answer_dialog import AnswerDialog
 from dialogs.base import PrismDialog
 from workers import AutomationWorker
 from addons.step.workers import (StepApplyWorker, StepAskWorker,
                                  StepMeasureWorker)
+from addons.step import sessions as SES
+from addons.step import workbench as WB
+from widgets.loader import Loader
+from widgets import controls as C
 from widgets import icons
 from widgets.ask_panel import AskPanel
 
@@ -66,6 +73,8 @@ ACTIONS = (
      "once you confirm — apply it to a COPY of the model, here, and "
      "re-measure it. The original is never touched."),
 )
+
+ACTIONS_BY_KEY = {key: label for key, label, _blurb in ACTIONS}
 
 # What the footer's one button says and does, per selected action — so the
 # single button a person must press always names the actual result ("Make
@@ -104,51 +113,66 @@ MODEL_CHOICES = (
 FALLBACK_ORDER = ("ChatGPT", "Claude")
 
 
-class PlanReviewDialog(PrismDialog):
-    """The review page, shown inside Prism instead of a separate browser
-    tab. Opening an external page and then immediately asking Yes/No in a
-    native popup used to race for focus — the browser usually won, so the
-    confirm sat there unseen behind it, and a build that looked declined
-    was really just never answered. Loading the SAME generated HTML here
-    removes the race outright: nothing can end up behind anything else."""
+# Short, per-action lines for the workbench's action block — the long text
+# stays on ACTIONS (and as each button's tooltip).
+ACTION_SHORT = {
+    "draft": "Draws the dimensioned sheet here — flat pattern, isometric, "
+             "every hole sized. No AI needed.",
+    "ask": "Measures, then answers your question from the numbers. Nothing "
+           "is built or opened.",
+    "edit": "Measures, plans, and — once you confirm — applies the change to "
+            "a copy of the model and re-measures it. The original is never "
+            "touched.",
+}
 
-    def __init__(self, title: str, subtitle: str, review_path: str,
-                can_build: bool, parent=None):
-        super().__init__(title, subtitle, icon="pencil", parent=parent)
-        self.resize(880, 680)
-        self.setMinimumSize(560, 420)
-        self.review_path = review_path
+class _InlineAnswer:
+    """What the follow-up and build logic talks to. It used to be the answer
+    pop-up (set_busy / set_answer); now it is the composer under the chat, so
+    nothing opens over the window."""
 
-        self.view = QTextBrowser()
-        self.view.setOpenExternalLinks(True)
-        self.view.setSource(QUrl.fromLocalFile(review_path))
-        self.body.addWidget(self.view, stretch=1)
+    def __init__(self, dlg):
+        self.dlg = dlg
+        self.question = ""
 
-        self.footer.add_utility(self.button(
-            i18n.t("Open as a file"), on_click=self._open_file))
-        if can_build:
-            self.footer.add_secondary(self.button(
-                i18n.t("Cancel"), on_click=self.reject))
-            self.footer.set_primary(self.button(
-                i18n.t("Build it"), "primary", on_click=self.accept))
-        else:
-            self.footer.set_primary(self.button(
-                i18n.t("Close"), "primary", on_click=self.accept))
+    def set_busy(self, busy: bool):
+        self.dlg.composer.set_busy(
+            busy, self.dlg.tr_busy if busy else "")
 
-    def _open_file(self):
-        QDesktopServices.openUrl(QUrl.fromLocalFile(self.review_path))
+    def set_answer(self, text: str, agent: str = ""):
+        self.dlg._followup_answered(self.question, text, agent)
+
+
+# What a run goes through, per action — the stages the loader shows.
+def _stages(action: str) -> list:
+    return {
+        "draft": [i18n.t("Measure"), i18n.t("Draw"), i18n.t("Save")],
+        "ask": [i18n.t("Measure"), i18n.t("Ask"), i18n.t("Answer")],
+        "edit": [i18n.t("Measure"), i18n.t("Plan"), i18n.t("Build"), i18n.t("Check")],
+    }.get(action, [])
 
 
 class StepDialog(PrismDialog):
-    def __init__(self, cfg: dict, attachments: list, parent=None):
+    # Asked of the main window when this is the screen (not a popup) and the
+    # person closes it.
+    leave_requested = Signal()
+
+    def __init__(self, cfg: dict, attachments: list, parent=None,
+                 embedded: bool = False):
         super().__init__(
             i18n.t("STEP"),
             i18n.t("Attach a 3D model. It is measured here, on this machine "
                    "— no AI ever sees the STEP file."),
-            icon="grid", parent=parent, closable=False, scrollable=True)
+            icon="grid", parent=parent, closable=False, scrollable=False)
         self.setWindowTitle("STEP — 3D model measurement")
-        self.resize(820, 820)
-        self.setMinimumSize(620, 520)
+        self._embedded = embedded
+        if embedded:
+            # The screen, not a window: it sits in the main window's stack
+            # like every other screen, so Ask, Edit and History all happen in
+            # the one place.
+            self.setWindowFlags(Qt.Widget)
+            self.setModal(False)
+        self.resize(1240, 800)
+        self.setMinimumSize(1000, 640)
         self.cfg = cfg
         self.sf = CB.get_stepfile()
 
@@ -164,81 +188,108 @@ class StepDialog(PrismDialog):
         self._followup_ask_worker = None
         self._followup_agent_worker = None
         self._built_from_popup = False
+        self._live: dict | None = None
+        self._followups: list = []
+        self._thread: list = []
+        self._run_path = ""
+        self._last_action = ""
+        self._pending: dict | None = None
+        self._awaiting = False
+        self._stay_on_plan = False
+        self._review_path = ""
+        self.tr_busy = i18n.t("Working on it…")
+        self._inline = _InlineAnswer(self)
         self._links: dict = {}
         self._responses: dict = {}
         self._stage_agents_map: dict = {}
         self._model_chain: list[str] = []
         self._made_files: list = []
         self._notes: list[str] = []
+        self._preview_ok = False
+        self._busy = False
+        self._session_key = ""
+        self._versions: list[dict] = []
+        self._sel = ""
+        self._loaded_run = ""
+        self._measure_lines: list[str] = []
 
+        # ── the workbench (preview/step-redesign/a2-workbench.html) ───────
+        # models · canvas with one action at a time · results in tabs. Every
+        # widget the logic below reads keeps its name; only where it sits has
+        # changed. The dialog's own header and footer are replaced by the
+        # top bar and the run row.
+        self.header.setVisible(False)
+        self.footer.setVisible(False)
         root = self.body
-        root.setSpacing(theme.ROW_GAP)
+        root.setSpacing(theme.SPACE_3)
+        root.setContentsMargins(theme.SPACE_4, theme.SPACE_3, theme.SPACE_4,
+                                theme.SPACE_4)
+        self.setAcceptDrops(True)
 
-        # ── 1 · the model first ────────────────────────────────────────
-        # The file comes before the question, in that order on screen: the
-        # question and the choice of action only appear once a model is
-        # attached, because nothing below makes sense without one.
-        title = QLabel(i18n.t("1 · Attach the STEP model"))
-        title.setObjectName("h4")
-        root.addWidget(title)
-        hint = QLabel(i18n.t("Add the .step / .stp file — several at once "
-                             "is fine. What to do with it comes next."))
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {theme.NEUTRAL[700]}; font-size: 12.5px;")
-        root.addWidget(hint)
-
-        self.ask = AskPanel(
-            "For Ask and Edit, say what you want — e.g. \"how do I make "
-            "this lighter?\" or \"fit M8 bolts instead of M6\". Draft needs "
-            "no text.")
-        self.ask.files_added.connect(self._on_files_added)
-        self.ask.file_removed.connect(self._on_file_removed)
-        root.addWidget(self.ask)
-
-        # The confidentiality promise, stated as a real notice — same as
-        # Gerber, because it is the same promise and the reason this sells.
-        lock = QFrame()
-        lock.setObjectName("stepLock")
-        lock.setAttribute(Qt.WA_StyledBackground, True)
-        lock.setStyleSheet(
-            f"#stepLock {{ background: {theme.OK_BG};"
-            f" border: 1px solid {theme.OK};"
-            f" border-radius: {theme.R_CONTROL}px; }}")
-        lock_row = QHBoxLayout(lock)
-        lock_row.setContentsMargins(theme.SPACE_3, theme.SPACE_3,
-                                    theme.SPACE_3, theme.SPACE_3)
-        lock_row.setSpacing(theme.SPACE_3)
-        glyph = QLabel()
-        glyph.setPixmap(icons.pixmap("lock", 17, theme.OK_INK))
-        glyph.setAlignment(Qt.AlignTop)
-        lock_row.addWidget(glyph)
-        lock_text = QLabel(
+        # ── top bar: STEP · the promise · output folder · options · close ──
+        top = QHBoxLayout()
+        top.setSpacing(theme.SPACE_3)
+        title = QLabel("STEP")
+        title.setStyleSheet(
+            f"font-family: '{theme.FONT_HEADING}'; font-size: 28px;"
+            " font-weight: 600; letter-spacing: 1px;")
+        top.addWidget(title)
+        lock = WB.chip("●  " + i18n.t("Measured here — never uploaded"), "ok")
+        lock.setToolTip(
             "The STEP file never leaves this machine. Draft, Ask and Edit "
             "show an AI only the measured NUMBERS and Prism's own plain "
             "render of the parts — never the model, never a path. Edits are "
             "made here, on a copy.")
-        lock_text.setWordWrap(True)
-        lock_text.setStyleSheet(f"color: {theme.OK_INK}; font-size: 13px;")
-        lock_row.addWidget(lock_text, stretch=1)
-        root.addWidget(lock)
+        lock.setStyleSheet(lock.styleSheet().replace("font-size: 10.5px",
+                                                     "font-size: 12px")
+                           + " padding: 4px 10px;")
+        top.addWidget(lock)
+        top.addStretch(1)
+        self.open_btn = self.button(i18n.t("Open in browser"), "secondary",
+                                    icon_name="external", small=True,
+                                    on_click=self._open_link)
+        self.open_btn.setEnabled(False)
+        self.open_btn.setVisible(False)
+        top.addWidget(self.open_btn)
+        self.folder_btn = self.button(i18n.t("Output folder"), "secondary",
+                                      icon_name="folder", small=True,
+                                      on_click=self._open_folder)
+        self.folder_btn.setEnabled(False)
+        top.addWidget(self.folder_btn)
+        self.opt_toggle = self.button("", "secondary", small=True,
+                                      on_click=self._toggle_options)
+        top.addWidget(self.opt_toggle)
+        top.addWidget(self.button("✕", "secondary", small=True,
+                                  on_click=self._close_clicked,
+                                  tooltip=i18n.t("Close")))
+        root.addLayout(top)
 
-        # ── options: material, and where the files go ──────────────────
-        opt_box = QGroupBox(i18n.t("Options"))
+        # The options live in a popover under the top bar's button.
+        opt_box = QFrame(self, Qt.Popup)
+        self.opt_box = opt_box
+        opt_box.setAttribute(Qt.WA_StyledBackground, True)
+        opt_box.setStyleSheet(
+            "QFrame { background: #ffffff; border: 1px solid "
+            f"{theme.NEUTRAL[300]}; border-radius: 12px; }}"
+            "QLabel, QComboBox, QLineEdit { border-radius: 6px; }")
+        opt_box.setFixedWidth(330)
         opt_v = QVBoxLayout(opt_box)
+        opt_v.setContentsMargins(14, 12, 14, 12)
         opt_v.setSpacing(theme.SPACE_2)
+        opt_v.addWidget(WB.heading(i18n.t("Measuring options")))
         mat_row = QHBoxLayout()
         mat_row.addWidget(QLabel(i18n.t("Material")))
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(list(self.sf.MODES))
         self.mode_combo.setCurrentText(self.cfg.get("step_mode") or "metal")
-        mat_row.addWidget(self.mode_combo)
-        mat_note = QLabel(i18n.t("— sheet metal reads thickness and weight "
-                                 "in steel; plastic reads wall and ABS/PP/PC"))
-        mat_note.setStyleSheet(
-            f"color: {theme.NEUTRAL[700]}; font-size: 12.5px;")
-        mat_row.addWidget(mat_note)
-        mat_row.addStretch(1)
+        mat_row.addWidget(self.mode_combo, stretch=1)
         opt_v.addLayout(mat_row)
+        mat_note = QLabel(i18n.t("Sheet metal reads thickness and weight in "
+                                 "steel; plastic reads wall and ABS/PP/PC."))
+        mat_note.setWordWrap(True)
+        mat_note.setStyleSheet(f"color: {theme.NEUTRAL[600]}; font-size: 12px;"
+                               " border: none;")
+        opt_v.addWidget(mat_note)
 
         # The bend-allowance K-factor a flat pattern is unfolded with —
         # theirs if they know it, Prism's own default if they don't. Never
@@ -250,23 +301,26 @@ class StepDialog(PrismDialog):
         k_row.addWidget(QLabel(i18n.t("Bend K-factor")))
         self.k_edit = QLineEdit()
         self.k_edit.setPlaceholderText(f"default {self.sf._DEFAULT_K_FACTOR:g}")
-        self.k_edit.setMaximumWidth(90)
+        self.k_edit.setMaximumWidth(110)
         self.k_edit.setText(str(self.cfg.get("step_k_factor") or ""))
         k_row.addWidget(self.k_edit)
-        k_note = QLabel(i18n.t("— only for a metal flat pattern; leave "
-                               "blank unless your shop gives you one"))
-        k_note.setStyleSheet(f"color: {theme.NEUTRAL[700]}; font-size: 12.5px;")
-        k_row.addWidget(k_note)
         k_row.addStretch(1)
         opt_v.addLayout(k_row)
+        k_note = QLabel(i18n.t("Only for a metal flat pattern; leave blank "
+                               "unless your shop gives you one."))
+        k_note.setWordWrap(True)
+        k_note.setStyleSheet(f"color: {theme.NEUTRAL[600]}; font-size: 12px;"
+                             " border: none;")
+        opt_v.addWidget(k_note)
 
         # Where everything for a model goes. Asked ONCE, the first time
         # Generate is pressed (see _ensure_root), and shown here so the
         # answer is never a mystery and can be changed at any time.
-        dir_row = QHBoxLayout()
         self.root_label = QLabel(self._root_caption())
         self.root_label.setWordWrap(True)
-        dir_row.addWidget(self.root_label, stretch=1)
+        self.root_label.setStyleSheet("font-size: 12px; border: none;")
+        opt_v.addWidget(self.root_label)
+        dir_row = QHBoxLayout()
         dir_row.addWidget(self.button(i18n.t("Change folder…"), "secondary",
                                       small=True, on_click=self._pick_root))
         self.root_default_btn = self.button(i18n.t("Use the Desktop"),
@@ -274,69 +328,140 @@ class StepDialog(PrismDialog):
                                             on_click=self._use_default_root)
         self.root_default_btn.setVisible(bool(self.cfg.get("step_out_dir")))
         dir_row.addWidget(self.root_default_btn)
+        dir_row.addStretch(1)
         opt_v.addLayout(dir_row)
-        root.addWidget(opt_box)
+        opt_v.addWidget(QLabel(i18n.t("Changing these re-measures the model.")))
+        self.mode_combo.currentTextChanged.connect(lambda _t: self._sync_opt_label())
 
-        # ── 2 · then what to do with it ────────────────────────────────
-        # Hidden until a model is attached. The question box and the Speak
-        # button are the AskPanel's own, reparented down here so the page
-        # reads top to bottom: the file, then the ask, then the action.
-        self.step2 = QWidget()
-        step2_v = QVBoxLayout(self.step2)
-        step2_v.setContentsMargins(0, 0, 0, 0)
-        step2_v.setSpacing(theme.ROW_GAP)
-        title2 = QLabel(i18n.t("2 · What do you want done with it?"))
-        title2.setObjectName("h4")
-        step2_v.addWidget(title2)
-        step2_v.addWidget(self.ask.edit)
-        mic_row = QHBoxLayout()
-        mic_row.addWidget(self.ask.mic_btn)
-        mic_row.addStretch(1)
-        step2_v.addLayout(mic_row)
-        act_box = QGroupBox(i18n.t("What to do"))
-        act_v = QVBoxLayout(act_box)
-        act_v.setSpacing(theme.SPACE_2)
+        cols = QHBoxLayout()
+        cols.setSpacing(theme.SPACE_3)
+        root.addLayout(cols, stretch=1)
+
+        # The AskPanel is kept — it holds the question box, Speak, and the
+        # attached-file list the logic reads — but its own file row is not
+        # shown: models are added from the drop zone on the left.
+        self.ask = AskPanel(
+            "For Ask and Edit, say what you want — e.g. \"how do I make "
+            "this lighter?\" or \"fit M8 bolts instead of M6\". Draft needs "
+            "no text.")
+        self.ask.files_added.connect(self._on_files_added)
+        self.ask.file_removed.connect(self._on_file_removed)
+        self.ask.setVisible(False)
+
+        # ── left · models, their history, the drop zone ──────────────────
+        self.models_card = WB.Card(i18n.t("Models"), counter=True)
+        self.models_card.setFixedWidth(280)
+        cols.addWidget(self.models_card)
+        self.model_list = WB.ModelList()
+        self.model_list.selected.connect(self._select_model)
+        self.model_list.removed.connect(self._remove_model)
+        self.model_list.trashed.connect(self._delete_model_files)
+        self.models_card.lay.addWidget(self.model_list)
+        self.hist_head = WB.heading(i18n.t("History"))
+        self.hist_head.setContentsMargins(16, 10, 16, 0)
+        self.models_card.lay.addWidget(self.hist_head)
+        self.history = WB.RunList()
+        self.history.chosen.connect(self.load_session)
+        self.history.delete_requested.connect(self._delete_chat)
+        hist_scroll = QScrollArea()
+        hist_scroll.setWidgetResizable(True)
+        hist_scroll.setFrameShape(QFrame.NoFrame)
+        hist_scroll.setStyleSheet("background: transparent;")
+        hist_scroll.setWidget(self.history)
+        self.models_card.lay.addWidget(hist_scroll, stretch=1)
+        drop_host = QWidget()
+        dl = QVBoxLayout(drop_host)
+        dl.setContentsMargins(10, 6, 10, 10)
+        self.drop = WB.DropZone()
+        self.drop.browse.connect(self.ask._pick_file)
+        self.drop.favourites.connect(self.ask._show_favourites)
+        self.drop.dropped.connect(self._on_files_added)
+        dl.addWidget(self.drop)
+        self.models_card.lay.addWidget(drop_host)
+
+        # ── centre · one action at a time, over the canvas ───────────────
+        centre_card = WB.Card()
+        cols.addWidget(centre_card, stretch=1)
+        bar = QFrame()
+        bar.setStyleSheet(f"border: none; border-bottom: 1px solid {WB._HAIR};")
+        bar_l = QHBoxLayout(bar)
+        bar_l.setContentsMargins(14, 10, 14, 10)
+        seg = QFrame()
+        seg.setObjectName("stepSegBar")
+        seg.setAttribute(Qt.WA_StyledBackground, True)
+        seg.setStyleSheet(
+            f"#stepSegBar {{ background: {theme.NEUTRAL[200]};"
+            f" border: none; border-radius: {theme.R_CONTROL + 2}px; }}"
+            "QPushButton#stepSeg { padding: 7px 22px; font-weight: 700;"
+            " border: 1px solid transparent; background: transparent;"
+            f" border-radius: {theme.R_CONTROL}px; color: {theme.NEUTRAL[700]}; }}"
+            f"QPushButton#stepSeg:checked {{ background: #ffffff;"
+            f" color: {theme.TEXT}; border: 1px solid {theme.NEUTRAL[300]}; }}")
+        seg_row = QHBoxLayout(seg)
+        seg_row.setContentsMargins(3, 3, 3, 3)
+        seg_row.setSpacing(2)
         self._action_group = QButtonGroup(self)
-        self._action_buttons: dict[str, QRadioButton] = {}
+        self._action_buttons: dict[str, QPushButton] = {}
         for key, label, blurb in ACTIONS:
-            row = QWidget()
-            row_l = QHBoxLayout(row)
-            row_l.setContentsMargins(0, 0, 0, 0)
-            row_l.setSpacing(theme.SPACE_2)
-            radio = QRadioButton(i18n.t(label))
+            radio = QPushButton(i18n.t(label))
+            radio.setObjectName("stepSeg")
+            radio.setCheckable(True)
+            radio.setCursor(Qt.PointingHandCursor)
             radio.setProperty("action", key)
+            radio.setToolTip(i18n.t(blurb))
             self._action_group.addButton(radio)
             self._action_buttons[key] = radio
-            row_l.addWidget(radio)
-            note = QLabel(i18n.t(blurb))
-            note.setWordWrap(True)
-            note.setStyleSheet(
-                f"color: {theme.NEUTRAL[700]}; font-size: 12.5px;")
-            row_l.addWidget(note, stretch=1)
-            act_v.addWidget(row)
+            seg_row.addWidget(radio)
         self._action_buttons["draft"].setChecked(True)
+        bar_l.addWidget(seg)
+        bar_l.addStretch(1)
+        centre_card.lay.addWidget(bar)
 
-        # Off by default: checked against Prism's own drawing, ChatGPT's
-        # "styled" copy just traced it, worse — same numbers, garbled
-        # text (see ACTIONS' own note above). Not deleted, because a
-        # differently-styled picture for sending to someone outside the
-        # shop is still a real, if occasional, reason to want one; it is
-        # just no longer something Draft spends a minute on unasked.
-        self.ai_draft_cb = QCheckBox(i18n.t(
-            "Also ask ChatGPT to draw a styled copy (optional — not an "
-            "independent check; see above)"))
-        self.ai_draft_cb.setChecked(bool(self.cfg.get("step_ai_draft")))
-        indent = QWidget()
-        indent_l = QHBoxLayout(indent)
-        indent_l.setContentsMargins(28, 0, 0, 0)
-        indent_l.addWidget(self.ai_draft_cb)
-        act_v.addWidget(indent)
-        step2_v.addWidget(act_box)
+        self.canvas = WB.Canvas()
+        self.canvas.choose.connect(self.ask._pick_file)
+        self.canvas.dropped.connect(self._on_files_added)
+        centre_card.lay.addWidget(self.canvas, stretch=1)
 
+        # A staged pipeline: the bar shows which stage the work is in.
+        self.progress = Loader("stages", _stages("draft"))
+        self.progress.setVisible(False)
+        centre_card.lay.addWidget(self.progress)
+        self.status = QLabel("")
+        self.status.setWordWrap(True)
+        self.status.setStyleSheet(
+            f"color: {theme.NEUTRAL[700]}; font-size: 12.5px;"
+            " padding: 6px 16px; border: none;")
+        centre_card.lay.addWidget(self.status)
+
+        # Hidden until a model is attached. The question box and the Speak
+        # button are the AskPanel's own, reparented down here so the action
+        # reads as one block: what to say, who answers, the button.
+        self.step2 = QFrame()
+        self.step2.setStyleSheet(f"border: none; border-top: 1px solid {WB._HAIR};")
+        step2_v = QVBoxLayout(self.step2)
+        step2_v.setContentsMargins(16, 12, 16, 12)
+        step2_v.setSpacing(theme.SPACE_2)
+        self.action_blurb = QLabel("")
+        self.action_blurb.setWordWrap(True)
+        self.action_blurb.setStyleSheet(
+            f"color: {theme.NEUTRAL[700]}; font-size: 12.5px; border: none;")
+        step2_v.addWidget(self.action_blurb)
+        # The question box sits directly in step2 (its own parent, as before);
+        # the Speak row and the "answer with" row are small hosts so a whole
+        # row can be shown or hidden with the action.
+        step2_v.addWidget(self.ask.edit)
+        mic_host = QWidget()
+        mic_row = QHBoxLayout(mic_host)
+        mic_row.setContentsMargins(0, 0, 0, 0)
+        mic_row.addWidget(self.ask.mic_btn)
+        mic_row.addStretch(1)
+        step2_v.addWidget(mic_host)
         # Who answers Ask/Edit's question — only matters once a question is
         # actually asked, but shown alongside the action so the choice is
-        # made before pressing Generate, not discovered after.
-        model_row = QHBoxLayout()
+        # made before pressing the button, not discovered after.
+        model_host = QWidget()
+        model_row = QHBoxLayout(model_host)
+        model_row.setContentsMargins(0, 0, 0, 0)
         model_row.addWidget(QLabel(i18n.t("Answer with:")))
         self.model_combo = QComboBox()
         for key, label in MODEL_CHOICES:
@@ -346,36 +471,105 @@ class StepDialog(PrismDialog):
         self.model_combo.setCurrentIndex(idx if idx >= 0 else 0)
         model_row.addWidget(self.model_combo)
         model_row.addStretch(1)
-        step2_v.addLayout(model_row)
+        step2_v.addWidget(model_host)
         model_hint = QLabel(i18n.t(
             "Groq answers in seconds. ChatGPT and Claude are stronger but "
             "slower — driven in a background Chrome window. If the one "
             "you pick can't answer, Prism tries the other one."))
         model_hint.setWordWrap(True)
         model_hint.setStyleSheet(
-            f"color: {theme.NEUTRAL[700]}; font-size: 12.5px;")
+            f"color: {theme.NEUTRAL[600]}; font-size: 12px; border: none;")
         step2_v.addWidget(model_hint)
+        self._ask_only = (self.ask.edit, mic_host, model_host, model_hint)
 
+        # Off by default: checked against Prism's own drawing, ChatGPT's
+        # "styled" copy just traced it, worse — same numbers, garbled
+        # text (see ACTIONS' own note above). Not deleted, because a
+        # differently-styled picture for sending to someone outside the
+        # shop is still a real, if occasional, reason to want one; it is
+        # just no longer something Draft spends a minute on unasked.
+        self.ai_draft_cb = QCheckBox(i18n.t(
+            "Also ask ChatGPT for a styled copy (optional)"))
+        self.ai_draft_cb.setToolTip(i18n.t(
+            "Not an independent check of the numbers — only a different "
+            "look."))
+        self.ai_draft_cb.setChecked(bool(self.cfg.get("step_ai_draft")))
+        step2_v.addWidget(self.ai_draft_cb)
+
+        run_row = QHBoxLayout()
+        run_row.addStretch(1)
+        draft_label, draft_icon = ACTION_BUTTON["draft"]
+        self.generate_btn = self.button(i18n.t(draft_label), "primary",
+                                        icon_name=draft_icon,
+                                        on_click=self._generate)
+        self.generate_btn.setEnabled(False)
+        self.generate_btn.setToolTip(i18n.t("Attach a model first"))
+        run_row.addWidget(self.generate_btn)
+        step2_v.addLayout(run_row)
         self.step2.setVisible(False)
-        root.addWidget(self.step2)
+        centre_card.lay.addWidget(self.step2)
 
-        # Only appears once a model has actually been measured.
-        self.meas_box = QGroupBox(i18n.t("Measured — not by an AI"))
+        # ── right · Measured · Answer · Plan · Files ─────────────────────
+        right = WB.Card()
+        self.right_card = right
+        right.setFixedWidth(420)
+        cols.addWidget(right)
+        tabs_row = QHBoxLayout()
+        tabs_row.setContentsMargins(8, 8, 8, 4)
+        self.out_tabs = C.Tabs([i18n.t("Measured"), i18n.t("Chat"),
+                                i18n.t("Plan"), i18n.t("Files")])
+        tabs_row.addWidget(self.out_tabs)
+        tabs_row.addStretch(1)
+        self.wide_btn = self.button("⤢", "secondary", small=True,
+                                    on_click=self._toggle_wide,
+                                    tooltip=i18n.t("Make this panel wider"))
+        tabs_row.addWidget(self.wide_btn)
+        right.lay.addLayout(tabs_row)
+        self.out_stack = QStackedWidget()
+        right.lay.addWidget(self.out_stack, stretch=1)
+        self.out_tabs.changed.connect(self.out_stack.setCurrentIndex)
+
+        # Measured — the register, then the back-solve, then the full text.
+        measured_page = QWidget()
+        mp = QVBoxLayout(measured_page)
+        mp.setContentsMargins(0, 0, 0, 0)
+        mp.setSpacing(0)
+        self.measured_empty = QLabel(i18n.t(
+            "Nothing measured yet — attach a model and press the button."))
+        self.measured_empty.setWordWrap(True)
+        self.measured_empty.setStyleSheet(
+            f"color: {theme.NEUTRAL[500]}; padding: {theme.SPACE_4}px;"
+            " border: none;")
+        mp.addWidget(self.measured_empty)
+        self.spec = WB.SpecPanel()
+        mp.addWidget(self.spec, stretch=1)
+        # The full text report (and where it was saved) — one click away.
+        self.meas_box = QWidget()
         meas_l = QVBoxLayout(self.meas_box)
+        meas_l.setContentsMargins(12, 4, 12, 8)
+        meas_l.setSpacing(theme.SPACE_1)
+        self.full_toggle = self.button(i18n.t("Full report  ▸"), "secondary",
+                                       small=True, on_click=self._toggle_full)
+        meas_l.addWidget(self.full_toggle)
+        self.full_box = QWidget()
+        fb = QVBoxLayout(self.full_box)
+        fb.setContentsMargins(0, 0, 0, 0)
         self.meas_view = QPlainTextEdit()
         self.meas_view.setReadOnly(True)
-        self.meas_view.setMinimumHeight(220)
-        meas_l.addWidget(self.meas_view)
+        self.meas_view.setMinimumHeight(180)
+        fb.addWidget(self.meas_view)
         self.files_label = QLabel("")
         self.files_label.setWordWrap(True)
         self.files_label.setStyleSheet(
             f"color: {theme.OK_INK}; background: {theme.OK_BG};"
             f" border-radius: {theme.R_CONTROL}px;"
             f" padding: {theme.SPACE_2}px {theme.SPACE_3}px;"
-            f" font-size: 13px;")
-        meas_l.addWidget(self.files_label)
+            f" font-size: 12.5px; border: none;")
+        fb.addWidget(self.files_label)
+        self.full_box.setVisible(False)
+        meas_l.addWidget(self.full_box)
         self.meas_box.setVisible(False)
-        root.addWidget(self.meas_box, stretch=1)
+        mp.addWidget(self.meas_box)
 
         # Back-solve the K-factor: the shop already knows the true flat
         # size of a part they've cut before (from a past job, or a
@@ -392,7 +586,7 @@ class StepDialog(PrismDialog):
             "the fabricator's own sheet) and its true length — Prism works "
             "out the K-factor that would have produced exactly that."))
         kfit_note.setWordWrap(True)
-        kfit_note.setStyleSheet(f"color: {theme.NEUTRAL[700]}; font-size: 12.5px;")
+        kfit_note.setStyleSheet(f"color: {theme.NEUTRAL[700]}; font-size: 12px;")
         kfit_v.addWidget(kfit_note)
         kfit_row = QHBoxLayout()
         self.kfit_part_combo = QComboBox()
@@ -403,7 +597,7 @@ class StepDialog(PrismDialog):
         kfit_row.addWidget(self.kfit_axis_combo)
         self.kfit_target_edit = QLineEdit()
         self.kfit_target_edit.setPlaceholderText(i18n.t("true size, mm"))
-        self.kfit_target_edit.setMaximumWidth(110)
+        self.kfit_target_edit.setMaximumWidth(100)
         kfit_row.addWidget(self.kfit_target_edit)
         kfit_row.addWidget(self.button(i18n.t("Solve"), "secondary",
                                        small=True, on_click=self._kfit_solve))
@@ -420,42 +614,52 @@ class StepDialog(PrismDialog):
         kfit_v.addLayout(result_row)
         self._kfit_solved: float | None = None
         self.kfit_box.setVisible(False)
-        root.addWidget(self.kfit_box)
+        mp.addWidget(self.kfit_box)
+        self.out_stack.addWidget(measured_page)
 
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 0)
-        self.progress.setVisible(False)
-        root.addWidget(self.progress)
-        self.status = QLabel("")
-        self.status.setWordWrap(True)
-        root.addWidget(self.status)
-
+        # Answer — what the AI drew, suggested or planned.
         self.result = QPlainTextEdit()
         self.result.setReadOnly(True)
+        self.result.setFrameShape(QFrame.NoFrame)
         self.result.setPlaceholderText(
-            i18n.t("What the AI drew, suggested or planned appears here."))
-        self.result.setMinimumHeight(120)
-        root.addWidget(self.result)
+            i18n.t("Everything done with this part — drafts, questions, edits — "
+                   "builds up here as one chat."))
+        answer_page = QWidget()
+        ap = QVBoxLayout(answer_page)
+        ap.setContentsMargins(0, 0, 0, 0)
+        ap.setSpacing(0)
+        # The finished chat is a page of cards; the plain box is for the live
+        # text a run writes while it is still going.
+        self.chat = WB.ChatView()
+        self.chat_stack = QStackedWidget()
+        self.chat_stack.addWidget(self.chat)
+        self.chat_stack.addWidget(self.result)
+        self.chat_stack.setCurrentWidget(self.result)
+        ap.addWidget(self.chat_stack, stretch=1)
+        # Carry on in the window: a follow-up, or "Build this".
+        self.composer = WB.Composer(MODEL_CHOICES)
+        self.composer.set_agent(self.cfg.get("step_ask_model", "Groq"))
+        self.composer.send.connect(self._composer_send)
+        self.composer.build.connect(self._composer_build)
+        self.composer.hide()
+        ap.addWidget(self.composer)
+        self.out_stack.addWidget(answer_page)
 
-        self.folder_btn = self.button(i18n.t("Open folder"), "secondary",
-                                      icon_name="folder", small=True,
-                                      on_click=self._open_folder)
-        self.folder_btn.setEnabled(False)
-        self.footer.add_utility(self.folder_btn)
-        self.open_btn = self.button(i18n.t("Open in browser"), "secondary",
-                                    icon_name="external", small=True,
-                                    on_click=self._open_link)
-        self.open_btn.setEnabled(False)
-        self.footer.add_utility(self.open_btn)
-        self.footer.add_secondary(
-            self.button(i18n.t("Close"), on_click=self.reject))
-        draft_label, draft_icon = ACTION_BUTTON["draft"]
-        self.generate_btn = self.button(i18n.t(draft_label), "primary",
-                                        icon_name=draft_icon,
-                                        on_click=self._generate)
-        self.generate_btn.setEnabled(False)
-        self.generate_btn.setToolTip(i18n.t("Attach a model first"))
-        self.footer.set_primary(self.generate_btn)
+        # Plan — the steps Edit proposed, for reading.
+        self.plan_panel = WB.PlanPanel()
+        self.plan_panel.set_plan(None)
+        self.plan_panel.build_clicked.connect(self._confirm_build)
+        self.plan_panel.skip_clicked.connect(self._skip_build)
+        self.plan_panel.refine_clicked.connect(self._refine_request)
+        self.plan_panel.open_review.connect(self._open_review_page)
+        self.out_stack.addWidget(self.plan_panel)
+
+        # Files — everything written for these models, named after them.
+        self.files_panel = WB.FilesPanel()
+        self.files_panel.open_folder.connect(self._open_folder)
+        self.files_panel.change_folder.connect(self._pick_root)
+        self.out_stack.addWidget(self.files_panel)
+
         # The one button a person must press always names the action it is
         # about to take — never a generic "Generate" they have to trust a
         # radio choice above it to interpret correctly.
@@ -463,9 +667,769 @@ class StepDialog(PrismDialog):
             radio.toggled.connect(
                 lambda checked: self._sync_generate_label() if checked
                 else None)
+            radio.toggled.connect(
+                lambda checked: self._sync_action_ui() if checked else None)
+        self._sync_opt_label()
+        self._sync_action_ui()
+        self._refresh_runs()
+        self._render_models()
+        self._set_canvas()
+        self._refresh_files()
 
         if attachments:
             self._on_files_added([a["path"] for a in attachments])
+
+    # ── the workbench's own small pieces ─────────────────────────────────
+
+    def _toggle_options(self):
+        """The options popover, under the top bar's button."""
+        if self.opt_box.isVisible():
+            self.opt_box.hide()
+            return
+        pos = self.opt_toggle.mapToGlobal(
+            self.opt_toggle.rect().bottomRight())
+        self.opt_box.adjustSize()
+        self.opt_box.move(pos.x() - self.opt_box.width(), pos.y() + 6)
+        self.opt_box.show()
+
+    def _sync_opt_label(self):
+        names = {"metal": i18n.t("Sheet metal"), "plastic": i18n.t("Plastic")}
+        self.opt_toggle.setText(names.get(self._mode(), self._mode()) + "  ▾")
+
+    def _toggle_wide(self):
+        """Give the results panel the room to read a chat in."""
+        wide = self.right_card.width() < 500
+        self.right_card.setFixedWidth(660 if wide else 420)
+        self.wide_btn.setToolTip(i18n.t("Make this panel narrower") if wide
+                                 else i18n.t("Make this panel wider"))
+
+    def _toggle_full(self):
+        on = self.full_box.isHidden()
+        self.full_box.setVisible(on)
+        self.full_toggle.setText(i18n.t("Full report  ▾") if on
+                                 else i18n.t("Full report  ▸"))
+
+    def _sync_action_ui(self):
+        """Only what the chosen action needs: the question box and who
+        answers it for Ask and Edit; the styled-copy tick for Draft."""
+        action = self._action()
+        self.action_blurb.setText(i18n.t(ACTION_SHORT[action]))
+        for w in self._ask_only:
+            w.setVisible(action in ("ask", "edit"))
+        self.ai_draft_cb.setVisible(action == "draft")
+        lay = self.step2.layout()
+        if lay is not None:
+            lay.invalidate()
+            lay.activate()
+
+    # models ---------------------------------------------------------------
+
+    def _model_for(self, path: str):
+        if path.startswith("run:"):
+            return next((m for m in self.models
+                         if m["out_dir"] == path[4:]), None)
+        key = os.path.normcase(path)
+        return next((m for m in self.models
+                     if m["path"] and os.path.normcase(m["path"]) == key), None)
+
+    def _current_path(self) -> str:
+        if self._sel and any(os.path.normcase(p) == os.path.normcase(self._sel)
+                             for p in self.paths):
+            return self._sel
+        if self.paths:
+            return self.paths[0]
+        if self.models:
+            return "run:" + self.models[0]["out_dir"]
+        return ""
+
+    def _remove_model(self, path: str):
+        """The ✕ on a model card: take an attached file back out, or let go
+        of a model that came back with a reopened run."""
+        if any(os.path.normcase(v["path"]) == os.path.normcase(path)
+               for v in self._versions):
+            # Taking a version off this screen — the file itself is untouched.
+            self._versions = [v for v in self._versions
+                              if os.path.normcase(v["path"]) != os.path.normcase(path)]
+            if any(os.path.normcase(p) == os.path.normcase(path) for p in self.paths):
+                self.ask.remove_path(path)
+            self._render_models()
+            return
+        if path.startswith("run:"):
+            self.models = [m for m in self.models if m["out_dir"] != path[4:]]
+            if not self.paths and not self.models:
+                self._session_key = ""
+            self._refresh_chat()
+            self._render_models()
+            self._refresh_files()
+            self._set_canvas()
+            return
+        self.ask.remove_path(path)
+
+    # deleting: a chat from History, or the files Prism made for a model ------
+
+    def _confirm(self, text: str, info: str, ok: str) -> bool:
+        """Ask before anything is deleted. Cancel is the default."""
+        box = QMessageBox(self)
+        box.setWindowTitle(i18n.t("STEP"))
+        box.setIcon(QMessageBox.Warning)
+        box.setText(text)
+        box.setInformativeText(info)
+        yes = box.addButton(ok, QMessageBox.DestructiveRole)
+        cancel = box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(cancel)
+        box.exec()
+        return box.clickedButton() is yes
+
+    def _folder_for(self, path: str, session: dict | None = None) -> str:
+        """The folder Prism made for the model on this card — or ''. Only a
+        folder that is safe to delete is ever offered."""
+        folder = ""
+        m = self._model_for(path) if path else None
+        if m is not None:
+            folder = m.get("out_dir") or ""
+        elif path:
+            want = os.path.normcase(os.path.abspath(path))
+            for item in (session or self._current_session() or {}).get("runs", []):
+                for rm in ((item["rec"].get("step") or {}).get("models") or []):
+                    for field in ("path", "modified"):
+                        if rm.get(field) and os.path.normcase(
+                                os.path.abspath(rm[field])) == want:
+                            folder = rm.get("out_dir") or ""
+        return self._safe_model_dir(folder)
+
+    def _safe_model_dir(self, folder: str) -> str:
+        """`folder` if it is a real folder exactly one level inside the
+        Prism Step folder and holds none of the files attached here — else ''.
+        Nothing outside what Prism itself made can be deleted through this."""
+        if not folder or os.path.islink(folder) or not os.path.isdir(folder):
+            return ""
+        try:
+            root = os.path.realpath(self._root())
+            real = os.path.realpath(folder)
+        except OSError:
+            return ""
+        if os.path.dirname(real) != root:
+            return ""
+        for p in self.paths:
+            if os.path.realpath(p).startswith(real + os.sep):
+                return ""
+        return real
+
+    def _delete_model_files(self, path: str):
+        if self._busy:
+            self.status.setText(i18n.t(
+                "A run is still going — delete files once it finishes."))
+            return
+        folder = self._folder_for(path)
+        if not folder:
+            self._notify_error(i18n.t(
+                "Prism will only delete the folder it made inside your STEP "
+                "folder — this one is somewhere else."))
+            return
+        count = sum(len(f) for _r, _d, f in os.walk(folder))
+        name = os.path.basename(folder)
+        if not self._confirm(
+                i18n.t("Delete the files Prism made for {name}?")
+                .replace("{name}", name),
+                i18n.t("This deletes the folder “{folder}” and the {n} files "
+                       "in it — the drawing sheet, the Excel sheet and any "
+                       "edited copies. Your original STEP file is not "
+                       "touched. This cannot be undone.")
+                .replace("{folder}", folder).replace("{n}", str(count)),
+                i18n.t("Delete these files")):
+            return
+        try:
+            shutil.rmtree(folder)
+        except OSError as exc:
+            self._notify_error(i18n.t("Could not delete {folder}: {why}")
+                               .replace("{folder}", folder).replace("{why}", str(exc)))
+            return
+        self.models = [m for m in self.models
+                       if os.path.realpath(m.get("out_dir") or "") != folder]
+        self._versions = [v for v in self._versions if os.path.exists(v["path"])]
+        if not self.paths and not self.models:
+            self._session_key = ""
+        self._refresh_chat()
+        self._render_models()
+        self._refresh_files()
+        self._set_canvas()
+        self.status.setText(i18n.t("Deleted {n} files in {name}.")
+                            .replace("{n}", str(count)).replace("{name}", name))
+
+    def _delete_chat(self, key: str):
+        if self._busy:
+            self.status.setText(i18n.t(
+                "A run is still going — delete a chat once it finishes."))
+            return
+        session = next((x for x in self._sessions() if x["key"] == key), None)
+        if session is None:
+            return
+        n = len(session["runs"])
+        if not self._confirm(
+                i18n.t("Delete the chat about {name}?").replace("{name}", session["name"]),
+                i18n.t("This removes the chat and its {n} from History. "
+                       "The files Prism made — sheets, Excel, edited copies — "
+                       "stay where they are.").replace(
+                    "{n}", i18n.t("1 run") if n == 1
+                    else i18n.t("{n} runs").replace("{n}", str(n))),
+                i18n.t("Delete this chat")):
+            return
+        gone, refused = DATA.delete_runs(
+            self.cfg, [r["path"] for r in session["runs"]])
+        if key == self._session_key:
+            self._session_key, self._live, self._versions = "", None, []
+            self.models, self._pending, self._awaiting = [], None, False
+            self.paths = []
+            self.ask.clear_files()
+            self.plan_panel.set_plan(None)
+            self._refresh_chat()
+            self._render_models()
+            self._refresh_files()
+            self._set_canvas()
+        else:
+            self._refresh_runs()
+        if refused:
+            self._notify_error(i18n.t("{n} runs could not be deleted.")
+                               .replace("{n}", str(len(refused))))
+        else:
+            self.status.setText(i18n.t("Deleted the chat about {name}.")
+                                .replace("{name}", session["name"]))
+
+    def _select_model(self, path: str):
+        if any(os.path.normcase(v["path"]) == os.path.normcase(path)
+               for v in self._versions):
+            self._choose_version(path)
+            return
+        self._sel = path
+        self._render_models()
+        self._set_canvas()
+
+    def _render_models(self):
+        items = []
+        shown = set()
+        cur = self._current_path()
+        if self._versions:
+            # A chat about one part: the original and each edited copy, to
+            # carry on from. The one being worked on is marked.
+            known = set()
+            sess = self._current_session()
+            for v in self._versions:
+                known.add(os.path.normcase(v["path"]))
+                here = os.path.normcase(v["path"]) == os.path.normcase(cur)
+                edited = v["kind"] == "edited"
+                when = time.strftime("%d %b %H:%M", time.localtime(v["stamp"])) \
+                    if v.get("stamp") else ""
+                items.append({
+                    "path": v["path"], "name": v["label"],
+                    "sub": (i18n.t("edited copy") if edited
+                            else i18n.t("original")) + (f" · {when}" if when else ""),
+                    "status": i18n.t("working on this") if here
+                    else i18n.t("carry on from this"),
+                    "tone": "ok" if here else ("warn" if edited else "info"),
+                    "folder": self._folder_for(v["path"], sess)})
+            for p in self.paths:
+                if os.path.normcase(p) not in known:
+                    items.append(self._model_item(p, self._model_for(p)))
+            self.model_list.set_items(items, cur)
+            self.models_card.set_count(len(items))
+            return
+        for p in self.paths:
+            m = self._model_for(p)
+            if m is not None:
+                shown.add(id(m))
+            items.append(self._model_item(p, m))
+        # Models that came back with a reopened run have no file attached to
+        # them (yet) — they are still listed, so the run reads as it did.
+        for m in self.models:
+            if id(m) in shown or any(
+                    os.path.normcase(m["path"] or "?") == os.path.normcase(p)
+                    for p in self.paths):
+                continue
+            items.append(self._model_item("", m))
+        self.model_list.set_items(items, cur)
+        self.models_card.set_count(len(items))
+
+    def _model_item(self, p: str, m) -> dict:
+        if m is not None:
+            rep = m["report"]
+            if rep.get("_stub"):
+                sub, status, tone = i18n.t("from a past run"), i18n.t("opened"), "info"
+            else:
+                ox, oy, oz = rep["overall_mm"]
+                sub = (f"{len(rep['parts'])} {i18n.t('parts')} · "
+                       f"{ox:g}×{oy:g}×{oz:g}")
+                status, tone = i18n.t("measured"), "ok"
+            name = os.path.basename(p) if p else rep["file"]
+            path = p or ("run:" + m["out_dir"])
+        else:
+            try:
+                sub = f"{os.path.getsize(p) / 1024:,.0f} KB"
+            except OSError:
+                sub = ""
+            busy = self._busy and self._worker is not None
+            status, tone = ((i18n.t("measuring…"), "info") if busy
+                            else (i18n.t("waiting"), "warn"))
+            name, path = os.path.basename(p), p
+        return {"path": path, "name": name, "sub": sub, "status": status,
+                "tone": tone, "folder": self._folder_for(path)}
+
+    # history: every past STEP run, one click to reopen -----------------------
+
+    def _records(self) -> list:
+        """Every STEP run on this machine, as {"path", "stamp", "rec"}."""
+        try:
+            runs = DATA.recent_runs(self.cfg, 200) or []
+        except Exception:                               # noqa: BLE001
+            return []
+        out = []
+        for run in runs:
+            if not str(run.get("title", "")).startswith("STEP"):
+                continue
+            path = run.get("path", "")
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    rec = json.load(f) or {}
+            except (OSError, ValueError):
+                continue
+            if rec.get("step"):
+                out.append({"path": path, "stamp": run.get("stamp", 0),
+                            "rec": rec, "when": run.get("when", "")})
+        return out
+
+    def _sessions(self) -> list:
+        return SES.build_sessions(self._records())
+
+    def _step_runs(self) -> list:
+        """One row per CHAT (a part and its edited versions), newest first."""
+        items = []
+        for sess in self._sessions()[:40]:
+            last = sess["runs"][-1]
+            n = len(sess["runs"])
+            action = (sess["actions"][-1] or "").capitalize()
+            items.append({
+                "path": sess["key"],
+                "action": action if action in ("Draft", "Ask", "Edit") else "STEP",
+                "text": sess["name"],
+                "when": (i18n.t("{n} runs").replace("{n}", str(n)) if n > 1
+                         else i18n.t("1 run")) + " · " + last.get("when", ""),
+                "tip": sess["name"] + " — " + ", ".join(
+                    dict.fromkeys(a.capitalize() for a in sess["actions"] if a))})
+        return items
+
+    def _refresh_runs(self):
+        self.history.set_items(self._step_runs(), self._session_key)
+
+    def load_run(self, path: str):
+        """Open the chat a run belongs to (Prism's History and the Home
+        screen's recent activity hand over a run's own path)."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                rec = json.load(f) or {}
+        except (OSError, ValueError):
+            self.status.setText(i18n.t("That run could not be read."))
+            return
+        info = rec.get("step") or {}
+        key = str(info.get("chat") or "")
+        if not key:
+            # A run saved before chats had ids: the chat it sits in is found
+            # by the run itself.
+            key = next((x["key"] for x in self._sessions()
+                        if any(r["path"] == path for r in x["runs"])), "")
+        self.load_session(key, focus=path)
+
+    def load_session(self, key: str, focus: str = ""):
+        """Reopen a chat: everything done to one part and its edited copies,
+        as one thread — with the original and each edited file offered to
+        carry on from. No other window opens."""
+        if self._busy:
+            self.status.setText(i18n.t(
+                "A run is still going — open another once it finishes."))
+            return
+        session = next((x for x in self._sessions() if x["key"] == key), None)
+        if session is None and focus:
+            self._apply_record(focus)
+            return
+        if session is None:
+            return
+        runs = session["runs"]
+        latest = next((r for r in runs if r["path"] == focus), runs[-1])
+        self._session_key = key
+        self._apply_record(latest["path"], rec=latest["rec"])
+        self._versions = self._single_part_versions(session)
+        self._set_chat(session)
+        if self._versions:
+            self._choose_version(self._versions[-1]["path"], quiet=True)
+        self._refresh_runs()
+        self._render_models()
+        self._show_tab(1)
+        n = len(self._versions)
+        self.status.setText(
+            i18n.t("Opened the chat about {name}.").replace("{name}", session["name"])
+            + (" " + i18n.t("Choose which file to carry on from on the left.")
+               if n > 1 else ""))
+
+    def _set_chat(self, session: dict | None, keep_live: bool = False):
+        text = SES.chat_text(session) if session else ""
+        if session or not keep_live:
+            self.result.setPlainText(text)
+        turns = SES.chat_turns(session) if session else []
+        if self._live:
+            turns = turns + [self._live]
+        if turns:
+            self.chat.set_turns(turns)
+            self.chat_stack.setCurrentWidget(self.chat)
+        else:
+            self.chat.set_turns([])
+            self.chat_stack.setCurrentWidget(self.result)
+        self._tab_label(1, i18n.t("Chat"), len(turns), zero=True)
+        self._sync_composer()
+
+    def _show_live(self):
+        self._set_chat(self._current_session(), keep_live=True)
+
+    def _sync_composer(self):
+        """The follow-up box is there when there is an answer to follow up on
+        and the measurement behind it."""
+        m = self._current or (self.models[0] if self.models else None)
+        key = f"ask · {m['report']['stem']}" if m and m.get("report") else ""
+        ok = bool(m and not m["report"].get("_stub") and key
+                  and self._responses.get(key))
+        self.composer.setVisible(ok)
+        if ok:
+            self.composer.build_btn.setVisible(
+                bool(m.get("path")) or self._action() == "edit")
+            self.composer.set_agent(self._stage_agents_map.get(key)
+                                    or self.cfg.get("step_ask_model", "Groq"))
+
+    def _refresh_chat(self, keep_live: bool = False):
+        """Show the chat this screen is in. It starts empty when a file is
+        attached — no matter what was done with that file before — and gains
+        a card for each thing done here. Take every file away and it goes;
+        reopen a chat from History to carry on in an old one."""
+        session = next((x for x in self._sessions()
+                        if x["key"] == self._session_key), None) \
+            if self._session_key else None
+        if session is None:
+            self._versions = []
+            self._set_chat(None, keep_live=keep_live)
+            self._refresh_runs()
+            return
+        self._versions = self._single_part_versions(session)
+        self._set_chat(session)
+        self._refresh_runs()
+
+    @staticmethod
+    def _single_part_versions(session: dict) -> list:
+        """The original and edited copies to carry on from — only when the
+        chat is about ONE part. A chat that holds several parts (files attached
+        together) has no single "original" to pick."""
+        versions = SES.versions_of(session)
+        if len({SES.lineage(v["path"]) for v in versions}) > 1:
+            return []
+        return versions
+
+    def _choose_version(self, path: str, quiet: bool = False):
+        """Carry on from this file — the original, or an edited copy."""
+        path = os.path.abspath(path)
+        self.ask.clear_files()
+        self.paths = [path]
+        self.ask.add_paths([path], emit=False)
+        self._sel = path
+        stored = None
+        for item in reversed((self._current_session() or {}).get("runs", [])):
+            for rm in ((item["rec"].get("step") or {}).get("models") or []):
+                if rm.get("path") and os.path.abspath(rm["path"]) == path \
+                        and rm.get("report"):
+                    stored = self._model_from_record(rm, item["rec"].get("step") or {})
+                    break
+            if stored:
+                break
+        self.models = [stored] if stored else []
+        self._current = stored
+        self.step2.setVisible(True)
+        self.generate_btn.setEnabled(True)
+        self.generate_btn.setToolTip("")
+        self._sync_generate_label()
+        if stored:
+            self.meas_box.setVisible(True)
+            self.measured_empty.setVisible(False)
+            self._refresh_spec()
+            self._fill_kfit_parts(self.models)
+        else:
+            self.spec.set_reports([])
+            self.meas_box.setVisible(False)
+            self.measured_empty.setVisible(True)
+            self.kfit_box.setVisible(False)
+        self._refresh_files()
+        self._render_models()
+        self._set_canvas()
+        if not quiet:
+            self.status.setText(i18n.t("Carrying on from {name}.").replace(
+                "{name}", os.path.basename(path)))
+
+    def _chat_has_runs(self) -> bool:
+        return bool(self._session_key and self._current_session())
+
+    def _current_session(self):
+        return next((x for x in self._sessions()
+                     if x["key"] == self._session_key), None)
+
+    def _apply_record(self, path: str, rec: dict | None = None):
+        """Put one run's question, answer, plan, model and files on screen."""
+        if not path and rec is None:
+            return
+        if self._busy:
+            self.status.setText(i18n.t(
+                "A run is still going — open another once it finishes."))
+            return
+        if rec is None:
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    rec = json.load(f) or {}
+            except (OSError, ValueError):
+                self.status.setText(i18n.t("That run could not be read."))
+                return
+        info = rec.get("step") or {}
+        if not info:
+            return
+        self._loaded_run = path
+        self._run_path = path
+        self._last_action = info.get("action") or ""
+        self._followups = list(info.get("followups") or [])
+        self._live, self._pending, self._awaiting = None, None, False
+        action = info.get("action") if info.get("action") in ACTIONS_BY_KEY else "draft"
+        self._action_buttons[action].setChecked(True)
+        self.ask.set_text(info.get("question", ""))
+        if info.get("mode") in list(self.sf.MODES):
+            self.mode_combo.setCurrentText(info["mode"])
+        self._responses = {k: list(v) for k, v in (rec.get("responses") or {}).items()}
+        self._links = dict(rec.get("links") or {})
+        self._notes = []
+        self.result.clear()
+        self.plan_panel.set_plan(None)
+        self._tab_label(1, i18n.t("Chat"), 0, zero=True)
+        self._tab_label(2, i18n.t("Plan"))
+        self.meas_view.clear()
+        # The models: attached again only if their file is still where it was.
+        self.ask.clear_files()
+        self.paths = []
+        self.models = []
+        wanted = []
+        for rm in info.get("models") or []:
+            mp = rm.get("path") or ""
+            if mp and os.path.exists(mp):
+                wanted.append(os.path.abspath(mp))
+            self.models.append(self._model_from_record(rm, info))
+        if wanted:
+            self.paths = list(wanted)
+            self.ask.add_paths(wanted, emit=False)
+            for m in self.models:
+                if m["path"]:
+                    m["path"] = os.path.abspath(m["path"])
+        self._sel = wanted[0] if wanted else ""
+        self.step2.setVisible(True)
+        self.generate_btn.setEnabled(bool(self.paths))
+        self.generate_btn.setToolTip(
+            "" if self.paths else i18n.t(
+                "The model file is not stored with this run — attach it "
+                "again to run something new."))
+        self._sync_generate_label()
+        self._current = self.models[0] if self.models else None
+        # What the run produced.
+        if self.models:
+            self.meas_box.setVisible(True)
+            self.measured_empty.setVisible(False)
+            self.folder_btn.setEnabled(True)
+            self._refresh_spec()
+            self._fill_kfit_parts(self.models)
+        stem = self.models[0]["report"]["stem"] if self.models else ""
+        thread = self._load_conversation(self.models[0]) if self.models else []
+        text = self._answer_text(rec, stem, thread)
+        if text:
+            self.result.setPlainText(text)
+            self._tab_label(1, i18n.t("Chat"), 0, zero=True)
+        plan_texts = (self._responses.get(f"plan · {stem}") or []) if stem else []
+        if plan_texts:
+            plan, _why = self.sf.parse_plan(plan_texts)
+            if plan:
+                self.plan_panel.set_plan(plan)
+                self._tab_label(2, i18n.t("Plan"),
+                                len(plan["changes"]) + len(plan["advice"]))
+        self.open_btn.setVisible(bool(self._links))
+        self.open_btn.setEnabled(bool(self._links))
+        self._refresh_files()
+        self._render_models()
+        self._set_canvas()
+        self._refresh_runs()
+        self._show_tab(1 if text else 0)
+        self._sync_composer()
+        self.status.setText(i18n.t("Opened a past run.") + (
+            "" if self.paths else " " + i18n.t(
+                "The model itself is not stored with it — the answer, "
+                "sheet and files are.")))
+
+    def _model_from_record(self, rm: dict, info: dict) -> dict:
+        """A model as a past run left it: its folder, its sheet, its files
+        and — for runs saved since the screen was rebuilt — its measurement."""
+        file = rm.get("file") or ""
+        stem = os.path.splitext(file)[0]
+        out_dir = rm.get("out_dir") or ""
+        names = self.sf.names(stem)
+        png = os.path.join(out_dir, names["png"])
+        if not os.path.exists(png) and os.path.isdir(out_dir):
+            png = next((os.path.join(out_dir, n) for n in sorted(os.listdir(out_dir))
+                        if n.lower().endswith(".png") and "drawing sheet" in n.lower()
+                        and "after" not in n.lower()), "")
+        xlsx = os.path.join(out_dir, names["xlsx"])
+        report = rm.get("report")
+        if not report:
+            report = {"file": file, "stem": stem, "mode": info.get("mode", ""),
+                      "overall_mm": (0, 0, 0), "parts": [], "warnings": [],
+                      "_stub": True}
+        else:
+            report = dict(report)
+            report["overall_mm"] = tuple(report.get("overall_mm") or (0, 0, 0))
+            for part in report.get("parts", []):
+                if "size_mm" in part:
+                    part["size_mm"] = tuple(part["size_mm"])
+        return {"path": rm.get("path") or "", "report": report,
+                "out_dir": out_dir,
+                "drawn": {"png": png if png and os.path.exists(png) else ""},
+                "xlsx": xlsx if os.path.exists(xlsx) else "",
+                "modified": rm.get("modified", "")}
+
+    @staticmethod
+    def _answer_text(rec: dict, stem: str, thread: list) -> str:
+        """The question and the answer(s), as one readable block."""
+        if thread:
+            return "\n\n".join(f"{who.upper()}\n{what}" for who, what in thread)
+        texts = (rec.get("responses") or {}).get(f"ask · {stem}") or []
+        question = ((rec.get("step") or {}).get("question") or "").strip()
+        body = "\n\n".join(t for t in texts if t and t.strip())
+        if not body:
+            return ""
+        return (f"YOU\n{question}\n\n" if question else "") + body
+
+    def enter(self):
+        """The screen was opened from the rail: pick up the latest config and
+        runs, and keep whatever the person had on it."""
+        self._refresh_runs()
+
+    def shutdown(self):
+        """Stop and join every worker — the same wind-down closeEvent does,
+        for when this is a screen and no window is closing."""
+        for worker in (self._worker, self._agent_worker, self._ask_worker,
+                       self._apply_worker, self._followup_ask_worker,
+                       self._followup_agent_worker):
+            if worker is None or not worker.isRunning():
+                continue
+            if hasattr(worker, "stop"):
+                worker.stop()
+            if not worker.wait(8000):
+                worker.terminate()
+                worker.wait(1000)
+
+    def _close_clicked(self):
+        if self._embedded:
+            self.leave_requested.emit()
+        else:
+            self.reject()
+
+    # canvas ---------------------------------------------------------------
+
+    def _set_canvas(self):
+        """What the big area shows: the invitation to attach, the models
+        that are waiting, the measuring progress, or — once measured —
+        Prism's own drawing sheet for the model picked on the left."""
+        if not self.paths and not self.models:
+            self.canvas.show_empty()
+            return
+        if self._busy and self._worker is not None and not self.models:
+            name = os.path.basename(self._current_path())
+            self.canvas.show_measuring(name, self._measure_lines)
+            return
+        m = self._model_for(self._current_path()) if self.models else None
+        if m is not None:
+            png = (m.get("drawn") or {}).get("png")
+            if png and os.path.exists(png) and self.canvas.show_sheet(
+                    png, i18n.t("Drawing sheet") + " · " + m["report"]["stem"]):
+                self._preview_ok = True
+                return
+            self._preview_ok = False
+            self.canvas.show_note(
+                i18n.t("Measured"),
+                i18n.t("No drawing sheet was made for this model — the "
+                       "numbers are on the right."))
+            return
+        names = ", ".join(os.path.basename(p) for p in self.paths[:3])
+        more = len(self.paths) - 3
+        self.canvas.show_waiting(names + (f" +{more}" if more > 0 else ""))
+
+    def _show_preview(self, results: list):
+        self._preview_ok = False
+        self._set_canvas()
+
+    # right-hand panes --------------------------------------------------------
+
+    def _show_tab(self, index: int):
+        self.out_tabs.set_current(index)
+        self.out_stack.setCurrentIndex(index)
+
+    def _tab_label(self, index: int, text: str, count: int = 0,
+                   zero: bool = False):
+        try:
+            self.out_tabs._buttons[index].setText(
+                f"{text}  {count}" if (count or zero) else text)
+        except (AttributeError, IndexError):
+            pass
+
+    def _k_note(self) -> str:
+        return i18n.t("yours") if self._k_factor() else i18n.t("default")
+
+    def _refresh_spec(self):
+        self.spec.set_reports([m["report"] for m in self.models], self._k_note())
+
+    def _refresh_files(self):
+        """Everything written for these models — the files are real; this
+        only lists what is on disk."""
+        files = []
+        for m in self.models:
+            folder = m["out_dir"]
+            for base, _dirs, names in os.walk(folder):
+                if os.path.relpath(base, folder).count(os.sep) > 1:
+                    continue
+                files += [os.path.join(base, n) for n in sorted(names)]
+            try:
+                conv = self._conversation_path(m)
+            except Exception:                           # noqa: BLE001
+                conv = ""
+            if conv and os.path.exists(conv):
+                files.append(conv)
+        self.files_panel.set_files(self._root(), files, bool(self.models))
+        self._tab_label(3, i18n.t("Files"), len(files))
+        return files
+
+    def _toast_saved(self, count: int):
+        self.canvas.toast(
+            i18n.t("✓ {n} files saved to {folder}")
+            .replace("{n}", str(count))
+            .replace("{folder}", os.path.basename(self.models[0]["out_dir"])
+                     if self.models else ""),
+            [(i18n.t("Open folder"), self._open_folder),
+             (i18n.t("View files"), lambda: self._show_tab(3))])
+
+    # dropping a model anywhere on the window ---------------------------------
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        paths = [u.toLocalFile() for u in event.mimeData().urls()
+                 if u.isLocalFile()]
+        if paths:
+            self._on_files_added(paths)
+            event.acceptProposedAction()
 
     # ── where the files go ───────────────────────────────────────────────
 
@@ -556,11 +1520,27 @@ class StepDialog(PrismDialog):
             if skipped:
                 self.status.setText(skipped)
             return
+        if self._chat_has_runs():
+            # This chat has been worked in; a new file is a new part, so it
+            # gets a new, empty chat — the old one stays in History.
+            self.ask.clear_files()
+            self.paths = []
+            self.models = []
+            self._versions = []
+            self._session_key = ""
         self.paths += models
         self.ask.add_paths(models, emit=False)
         self.step2.setVisible(True)      # the file is in; now the ask
         self.generate_btn.setEnabled(True)
         self.generate_btn.setToolTip("")
+        self._sel = models[0]
+        if not self._session_key:
+            # A file with no chat open starts a new one — empty, whatever was
+            # done with this file before.
+            self._session_key = uuid.uuid4().hex[:10]
+        self._refresh_chat()
+        self._render_models()
+        self._set_canvas()
         n = len(self.paths)
         self.status.setText(
             (i18n.t("{n} models attached. ").format(n=n) if n > 1
@@ -580,6 +1560,11 @@ class StepDialog(PrismDialog):
         self.paths = [p for p in self.paths if os.path.normcase(p) != key]
         self.step2.setVisible(bool(self.paths))
         self.generate_btn.setEnabled(bool(self.paths))
+        if not self.paths and not self.models:
+            self._session_key = ""
+        self._refresh_chat()
+        self._render_models()
+        self._set_canvas()
         n = len(self.paths)
         self.status.setText(
             i18n.t("{n} models attached.").format(n=n) if n else
@@ -644,23 +1629,26 @@ class StepDialog(PrismDialog):
         question = self.ask.text().strip()
         if action in ("ask", "edit"):
             if not question:
-                QMessageBox.warning(self, "STEP", i18n.t(
+                self._notify_error(i18n.t(
                     "Say what you want to know or change — type the "
                     "question in the box above."))
+                self.ask.setFocus()
                 return
             if self._chosen_model() == "Groq" and not self.cfg.get("api_key"):
-                QMessageBox.warning(self, "STEP", i18n.t(
+                self._notify_error(i18n.t(
                     "Groq needs your key — add it in Settings, or pick "
                     "ChatGPT or Claude above instead."))
                 return
         if action == "edit" and not self._planner():
-            QMessageBox.warning(self, "STEP", i18n.t(
+            self._notify_error(i18n.t(
                 "Edit needs a reasoning tool to review the plan — open "
                 "Agents and pick one for Reasoning first."))
             return
         if not self._ensure_root():
             return
 
+        if not self._session_key:
+            self._session_key = uuid.uuid4().hex[:10]
         self.cfg["step_mode"] = self._mode()
         self.cfg["step_k_factor"] = self.k_edit.text().strip()
         self.cfg["step_ai_draft"] = self.ai_draft_cb.isChecked()
@@ -673,17 +1661,29 @@ class StepDialog(PrismDialog):
         self._responses, self._links, self._notes = {}, {}, []
         self.meas_view.clear()
         self.result.clear()
+        self._measure_lines = []
+        self._live, self._followups, self._thread = None, [], []
+        self._pending, self._awaiting, self._run_path = None, False, ""
+        self.chat_stack.setCurrentWidget(self.result)
+        self.plan_panel.set_plan(None)
+        self._tab_label(1, i18n.t("Chat"), 0, zero=True)
+        self._tab_label(2, i18n.t("Plan"))
+        self.progress.set_stages(_stages(action))
         self._set_busy(True, i18n.t(
-            "Measuring — the model never leaves this machine…"))
+            "Measuring — the model never leaves this machine…"), 0)
         self._worker = StepMeasureWorker(list(self.paths), self._mode(),
                                          self._root(), self._k_factor())
         self._worker.progress.connect(self._on_progress)
         self._worker.done.connect(self._on_measured)
         self._worker.failed.connect(self._on_failed)
         self._worker.start()
+        self._render_models()
+        self._set_canvas()
 
     def _on_progress(self, line: str):
         self.meas_view.appendPlainText(f"   {line}")
+        self._measure_lines.append(line.strip())
+        self._set_canvas()
 
     def _on_measured(self, results: list):
         self.models = results
@@ -710,7 +1710,13 @@ class StepDialog(PrismDialog):
             i18n.t("Saved so every number can be checked → ")
             + "; ".join(files))
         self.meas_box.setVisible(True)
+        self.measured_empty.setVisible(False)
+        self._refresh_spec()
+        self._show_tab(0)
         self.folder_btn.setEnabled(True)
+        self._show_preview(results)
+        files = self._refresh_files()
+        self._toast_saved(len(files))
         self._fill_kfit_parts(results)
         self._queue = list(results)
         self._next()
@@ -807,7 +1813,7 @@ class StepDialog(PrismDialog):
         self._set_busy(True, i18n.t(
             "{agent} is drawing the dimensioned sheet for {file} — from "
             "the measured numbers only; the model stays here…")
-            .replace("{agent}", artist).replace("{file}", report["file"]))
+            .replace("{agent}", artist).replace("{file}", report["file"]), 1)
         self._agent_worker = AutomationWorker(
             {}, self.cfg, files, f"STEP — draft sheet for {report['file']}",
             custom_stages=[("visual", artist, [self.sf.auto_brief(report)])],
@@ -872,7 +1878,7 @@ class StepDialog(PrismDialog):
         self._set_busy(True, i18n.t(
             "Asking Groq about {file} — the measured numbers and your "
             "question only; the model stays here…")
-            .replace("{file}", report["file"]))
+            .replace("{file}", report["file"]), 1)
         self._ask_worker = StepAskWorker(self.cfg, report,
                                          self.ask.text().strip())
         self._ask_worker.done.connect(self._on_suggested)
@@ -890,7 +1896,7 @@ class StepDialog(PrismDialog):
         self._set_busy(True, i18n.t(
             "Asking {tool} about {file} — the measured numbers and your "
             "question only; the model stays here…")
-            .replace("{tool}", tool).replace("{file}", report["file"]))
+            .replace("{tool}", tool).replace("{file}", report["file"]), 1)
         self._agent_worker = AutomationWorker(
             {}, self.cfg, [], f"STEP — ask {tool} about {report['file']}",
             custom_stages=[("ask", tool, [self.sf.ask_prompt(
@@ -955,62 +1961,74 @@ class StepDialog(PrismDialog):
             pass
 
     def _on_suggested(self, suggestions: str, agent: str = "Groq"):
+        """The answer arrives — in the Chat tab, not a window. Ask is done
+        (the answer is the deliverable, the box below it carries on the
+        conversation). Edit goes straight on to plan the changes."""
         m = self._current
         report = m["report"]
         key = f"ask · {report['stem']}"
         self._responses[key] = [suggestions]
         self._stage_agents_map[key] = agent
         is_edit = self._action() == "edit"
-        answer_dlg = AnswerDialog(
-            i18n.t("STEP — Answer"),
-            i18n.t("{file} · answered by {agent}").replace(
-                "{file}", report["file"]).replace("{agent}", agent),
-            self.ask.text().strip(), suggestions, agent, self,
-            allow_followup=True, model_choices=MODEL_CHOICES,
-            allow_build=is_edit,
-            prior_thread=self._load_conversation(m),
-            on_change=lambda thread, m=m: self._save_conversation(m, thread))
-        answer_dlg.followup_requested.connect(
-            lambda text, chosen, m=m, key=key, dlg=answer_dlg:
-                self._on_answer_followup(dlg, m, key, chosen, text))
-        # "Build this" — the person may click it any number of times
-        # before closing (each follow-up's answer is a fresh thing worth
-        # being able to build), so this does NOT close the popup itself.
-        answer_dlg.build_requested.connect(
-            lambda m=m, key=key, dlg=answer_dlg:
-                self._build_plan_for(m, key, dlg))
-        answer_dlg.exec()
-        # self._responses[key] is the latest version — the original answer,
-        # or whatever a follow-up replaced it with while the popup was open.
-        suggestions = self._responses[key][0]
-        self.result.appendPlainText(
-            f"═══ {report['file']} — suggestions from {agent} (from the "
-            f"measured figures) ═══\n{suggestions}\n")
+        question = self.ask.text().strip()
+        self._followups = []
+        self._thread = self._load_conversation(m) + [
+            (i18n.t("You asked"), question), (agent, suggestions)]
+        self._save_conversation(m, self._thread)
+        self._live = SES.live_turn(self._action(), report["file"], question,
+                                   suggestions)
+        self._show_live()
+        self._show_tab(1)
         if not is_edit:
-            # Ask's whole deliverable is the answer above — no plan, no
-            # review page, nothing opened, ever, automatically. Only Edit
-            # builds, and only on request (the "Build this" button above,
-            # or automatically once, below, for a fresh Edit's own first
-            # answer) — never a follow-up read back later and assumed.
+            # Ask's whole deliverable is the answer — no plan, no review
+            # page, nothing opened. Only Edit builds, and only on request.
             self._notes.append(f"{report['file']}: suggestions only — "
                                "choose Edit to turn this into a change "
                                "plan")
             self._next()
             return
-        if self._built_from_popup:
-            # "Build this" already ran the plan/build cycle (maybe more
-            # than once) while the popup was open — the queue moves on
-            # without doing it a second time, automatically, on the
-            # original answer.
-            self._built_from_popup = False
-            self._next()
-            return
-        # The ordinary, first-time path: a fresh Edit's own answer, never
-        # followed up on, builds automatically once the popup closes —
-        # unchanged from before "Build this" existed.
         self._build_plan_for(m, key, None)
 
-    def _build_plan_for(self, m: dict, key: str, popup: "AnswerDialog | None"):
+    # ── carrying on in the chat: a follow-up, or "Build this" ─────────────
+
+    def _composer_send(self, text: str, agent: str):
+        m = self._current or (self.models[0] if self.models else None)
+        if m is None or m["report"].get("_stub"):
+            return
+        key = f"ask · {m['report']['stem']}"
+        if not self._responses.get(key):
+            return
+        self._inline.question = text
+        self._on_answer_followup(self._inline, m, key, agent, text)
+
+    def _composer_build(self):
+        m = self._current or (self.models[0] if self.models else None)
+        if m is None or m["report"].get("_stub"):
+            return
+        key = f"ask · {m['report']['stem']}"
+        if not self._responses.get(key):
+            return
+        self._build_plan_for(m, key, self._inline)
+
+    def _followup_answered(self, question: str, answer: str, agent: str):
+        """A follow-up came back: it joins the chat, is saved with the run,
+        and is kept in the conversation file."""
+        m = self._current or (self.models[0] if self.models else None)
+        self._followups.append({"q": question, "a": answer, "agent": agent})
+        if m is not None:
+            self._thread += [(i18n.t("You followed up"), question),
+                             (agent, answer)]
+            self._save_conversation(m, self._thread)
+        self.composer.clear()
+        if self._live is not None:
+            self._live["followups"] = list(self._followups)
+            self._show_live()
+        else:
+            self._persist_run()
+            self._refresh_chat()
+        self._show_tab(1)
+
+    def _build_plan_for(self, m: dict, key: str, popup):
         """Turn whatever is CURRENTLY saved at `key` into a plan, then (if
         confirmed) a build — the same pipeline a fresh Edit's own first
         answer already ran automatically, now reachable on demand from
@@ -1019,12 +2037,6 @@ class StepDialog(PrismDialog):
         report = m["report"]
         suggestions = self._responses[key][0]
         if popup is not None:
-            # "Build this" clicked from WITHIN the popup, while
-            # _on_suggested's own .exec() call is still on the stack —
-            # mark it so that call's own continuation (the automatic,
-            # first-time build) skips running a second time once the
-            # popup finally closes.
-            self._built_from_popup = True
             popup.set_busy(True)
         planner = self._planner()
         if not planner:
@@ -1032,7 +2044,7 @@ class StepDialog(PrismDialog):
                          "— open Agents and pick one for Reasoning first.")
             if popup is not None:
                 popup.set_busy(False)
-                QMessageBox.warning(self, "STEP", msg)
+                self._notify_error(msg)
             else:
                 self._notes.append(f"{report['file']}: suggestions only — "
                                    "no reasoning tool set up to plan "
@@ -1051,7 +2063,7 @@ class StepDialog(PrismDialog):
             self._set_busy(True, i18n.t(
                 "{agent} is reviewing the suggestions into an exact change "
                 "plan for {file}…")
-                .replace("{agent}", planner).replace("{file}", report["file"]))
+                .replace("{agent}", planner).replace("{file}", report["file"]), 1)
         self._agent_worker = AutomationWorker(
             {}, self.cfg, files,
             f"STEP — review and plan CAD changes for {report['file']}",
@@ -1066,15 +2078,18 @@ class StepDialog(PrismDialog):
         self._agent_worker.start()
 
     def _on_build_failed(self, error: str, popup):
+        self._awaiting = False
+        self.plan_panel.hide_bar()
         if popup is not None:
             popup.set_busy(False)
-            QMessageBox.warning(self, "STEP", error)
+            self._set_busy(False, "")
+            self._notify_error(error)
         else:
             self._on_failed(error)
 
     # ── a follow-up typed inside the answer popup ─────────────────────────
 
-    def _on_answer_followup(self, dlg: AnswerDialog, m: dict, key: str,
+    def _on_answer_followup(self, dlg, m: dict, key: str,
                             agent: str, text: str):
         """`agent` is whatever was selected in the popup's own "Reply as"
         picker when Send was pressed — the same one that answered first,
@@ -1124,14 +2139,14 @@ class StepDialog(PrismDialog):
             lambda err, dlg=dlg: self._on_answer_followup_failed(dlg, err))
         self._followup_agent_worker.start()
 
-    def _on_answer_followup_done(self, dlg: AnswerDialog, key: str,
+    def _on_answer_followup_done(self, dlg, key: str,
                                  answer: str):
         self._responses[key] = [answer]
         self._stage_agents_map[key] = "Groq"
         dlg.set_busy(False)
         dlg.set_answer(answer, "Groq")
 
-    def _on_answer_followup_agent_done(self, dlg: AnswerDialog, key: str,
+    def _on_answer_followup_agent_done(self, dlg, key: str,
                                        agent: str, responses: dict,
                                        links: dict):
         texts = [t for t in (responses.get("ask") or []) if t.strip()]
@@ -1147,19 +2162,18 @@ class StepDialog(PrismDialog):
         dlg.set_busy(False)
         dlg.set_answer(texts[0], agent)
 
-    def _on_answer_followup_failed(self, dlg: AnswerDialog, error: str):
+    def _on_answer_followup_failed(self, dlg, error: str):
         dlg.set_busy(False)
-        QMessageBox.warning(self, "STEP", error)
+        self._notify_error(error)
 
     def _on_planned(self, responses: dict, links: dict, m: dict = None,
                     popup=None):
-        """`popup` is the AnswerDialog this plan was requested from, or
-        None for the original automatic path (a fresh Edit's own first
-        answer, which drives the model queue via `self._next()`).
-        "Build this" clicked from a popup — possibly reopened long after
-        the original run finished — never touches the queue: the popup
-        just stays open, built or not, for as long as the person wants
-        it."""
+        """The plan came back — in the Plan tab, not a window. With changes
+        in it, a Build bar waits for you; nothing is built until you press it.
+        With none, it says so and says what to do next.
+
+        `popup` is the inline answer box when this was asked for by "Build
+        this" (then the queue is not touched); None for an Edit's own run."""
         m = m or self._current
         report, out_dir = m["report"], m["out_dir"]
         self._links.update({f"{k} · {report['stem']}": v
@@ -1169,74 +2183,93 @@ class StepDialog(PrismDialog):
         self._stage_agents_map[f"plan · {report['stem']}"] = self._planner()
         plan, why = self.sf.parse_plan(texts)
         if plan is None:
+            self.status.setText(why)
             if popup is not None:
                 popup.set_busy(False)
-                QMessageBox.warning(self, "STEP", why)
                 return
             self._notes.append(f"{report['file']}: {why}")
-            self.result.appendPlainText(f"{report['file']} — {why}")
             self._next()
             return
         m["plan"] = plan
-        lines = []
-        for ch in plan["changes"]:
-            what = (f"Ø{ch['dia_mm']:g} → Ø{ch['new_dia_mm']:g} on {ch['part']}"
-                    if ch["op"] == "enlarge_hole"
-                    else f"scale {ch['part']} x {ch['factor']:g}")
-            lines.append(f"  ▸ {what}" + (f" — {ch['why']}" if ch["why"] else ""))
-        for a in plan["advice"]:
-            lines.append(f"  • (for the designer) {a}")
+        self.plan_panel.set_plan(plan)
+        self._tab_label(2, i18n.t("Plan"), len(plan["changes"]) + len(plan["advice"]))
         question = self.ask.text().strip()
         review = self.sf.review_html(report, plan, out_dir, question=question)
-        self.result.appendPlainText(
-            f"{report['file']} — the plan (review page → {review}):\n"
-            + ("\n".join(lines) if lines else "  nothing Prism can apply by "
-                                             "itself — the advice is the "
-                                             "deliverable") + "\n")
-        can_build = bool(plan["changes"])
-        out = self.sf.names(report)
+        self._review_path = review
         if popup is not None:
             popup.set_busy(False)
-        review_dlg = PlanReviewDialog(
-            i18n.t("STEP — Review the plan") if can_build
-            else i18n.t("STEP — The plan"),
-            (i18n.t("{file} — confirm here and Prism builds a new copy. "
-                    "The original file is never touched.")
-             .replace("{file}", report["file"]) if can_build else
-             i18n.t("{file} — nothing Prism can apply by itself; the "
-                    "advice above is the deliverable")
-             .replace("{file}", report["file"])),
-            review, can_build, self)
-        built = bool(review_dlg.exec())
-        if not can_build:
-            self._notes.append(f"{report['file']}: plan reviewed → {review}")
+        self._show_tab(2)
+        if not plan["changes"]:
+            self._notes.append(f"{report['file']}: nothing Prism can apply by "
+                               "itself — see the Plan tab, then refine the request")
+            self.status.setText(i18n.t(
+                "Nothing to build yet — the Plan tab says why and what to do next."))
             if popup is None:
+                self._stay_on_plan = True      # keep the explanation in view
                 self._next()
             return
-        if not built:
-            self._notes.append(f"{report['file']}: not built — the review "
-                               "page stays as the record of the plan")
-            if popup is None:
-                self._next()
+        # Something to build: wait for the person.
+        self._pending = {"m": m, "plan": plan, "question": question,
+                         "popup": popup, "out_dir": out_dir}
+        self._awaiting = True
+        self._set_busy(False, i18n.t(
+            "Review the plan on the right, then press “Build the modified model”."))
+        self.plan_panel.ask_to_build(len(plan["changes"]), report["file"])
+
+    def _confirm_build(self):
+        pend = self._pending
+        if not pend:
             return
+        self._pending = None
+        self._awaiting = False
+        m, plan, popup = pend["m"], pend["plan"], pend["popup"]
+        report = m["report"]
+        self.plan_panel.building()
         if popup is not None:
             popup.set_busy(True)
-        else:
-            self._set_busy(True, i18n.t(
-                "Building a copy and re-measuring it…"))
+        self.progress.set_stages(_stages("edit"))
+        self._set_busy(True, i18n.t("Building a copy and re-measuring it…"), 2)
         self._apply_worker = StepApplyWorker(
-            m["path"], plan, report, self._mode(), out_dir, question,
-            self._k_factor())
+            m["path"], plan, report, self._mode(), pend["out_dir"],
+            pend["question"], self._k_factor())
         self._apply_worker.done.connect(
             lambda result, m=m, popup=popup: self._on_applied(result, m, popup))
         self._apply_worker.failed.connect(
             lambda err, popup=popup: self._on_build_failed(err, popup))
         self._apply_worker.start()
 
+    def _skip_build(self):
+        pend = self._pending
+        if not pend:
+            return
+        self._pending = None
+        self._awaiting = False
+        report = pend["m"]["report"]
+        self.plan_panel.hide_bar()
+        self._notes.append(f"{report['file']}: not built — the plan stays in "
+                           "the Plan tab and the review page")
+        self._set_busy(False, "")
+        if pend["popup"] is None:
+            self._next()
+
+    def _refine_request(self):
+        """The plan had nothing to build: back to the question box."""
+        self._show_tab(1)
+        self.ask.edit.setFocus()
+        self.ask.edit.selectAll()
+        self.status.setText(i18n.t(
+            "Say exactly which holes and to what size (or a scale factor), "
+            "then press the button again."))
+
+    def _open_review_page(self):
+        if self._review_path and os.path.exists(self._review_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self._review_path))
+
     def _on_applied(self, result: dict, m: dict = None, popup=None):
         m = m or self._current
         report = m["report"]
         m["modified"] = result["out"]
+        self._review_path = result.get("review") or self._review_path
         self.result.appendPlainText(
             f"{report['file']} — built {os.path.basename(result['out'])}:\n  "
             + "\n  ".join(result["log"]) + "\n\n"
@@ -1249,59 +2282,126 @@ class StepDialog(PrismDialog):
                                     kind="step", task=report["file"])
         except Exception:                               # noqa: BLE001
             pass
-        # The same green confirmation _on_measured shows for where the
-        # measurement was saved — missing here since "Build this" and the
-        # follow-up path were added, so a completed build gave no visible
-        # sign of where the modified file actually landed.
         self.files_label.setText(
             i18n.t("Saved — the modified file is at ") + result["out"])
         self.meas_box.setVisible(True)
+        self.measured_empty.setVisible(False)
+        self.plan_panel.built(os.path.basename(result["out"]))
+        self._refresh_files()
+        if self._live is not None:
+            self._live["built"] = [result["out"]]
+            self._show_live()
         if popup is not None:
             popup.set_busy(False)
-        QDesktopServices.openUrl(QUrl.fromLocalFile(result["review"]))
-        if popup is None:
+            self._persist_run()
+            self._refresh_chat()
+            self._render_models()
+        else:
             self._next()
+        self._set_busy(False, i18n.t(
+            "Built {name}. It is in the Models list — carry on from it there.")
+            .replace("{name}", os.path.basename(result["out"])))
 
     # ── finishing ───────────────────────────────────────────────────────
 
+    def _run_record(self, action: str) -> dict:
+        label = {"draft": "Draft", "ask": "Ask", "edit": "Edit"}[action]
+        names = ", ".join(m["report"]["file"] for m in self.models)
+        question = self.ask.text().strip()
+        self._task_name = f"STEP — {label}: {question or names}"
+        return {
+            "query": self._task_name,
+            "responses": self._responses, "links": self._links,
+            "step": {
+                "action": action, "mode": self._mode(),
+                "question": question,
+                "chat": self._session_key,
+                "followups": list(self._followups),
+                "models": [{"file": m["report"]["file"],
+                            "path": m.get("path", ""),
+                            "report": self._storable(m["report"]),
+                            "out_dir": m["out_dir"],
+                            "modified": m.get("modified", ""),
+                            "conversation": self._conversation_path(m)}
+                           for m in self.models],
+            },
+        }
+
+    def _persist_run(self):
+        """Save what happened after the run finished — a follow-up, a build —
+        into the same run record."""
+        if not (self._run_path and self.models and self._last_action):
+            return
+        try:
+            CB.config.save_run(self._run_record(self._last_action),
+                               path=self._run_path)
+        except Exception:                               # noqa: BLE001
+            pass
+
     def _finish(self):
         action = self._action()
-        label = {"draft": "Draft", "ask": "Ask", "edit": "Edit"}[action]
         self._set_busy(False, i18n.t("Done. ") + (
             " ".join(self._notes) if self._notes
             else i18n.t("Measured from the geometry itself — not by an AI.")))
         self.open_btn.setEnabled(bool(self._links))
-        names = ", ".join(m["report"]["file"] for m in self.models)
-        question = self.ask.text().strip()
-        self._task_name = f"STEP — {label}: {question or names}"
+        self.open_btn.setVisible(bool(self._links))
+        self._refresh_files()
+        self._render_models()
         try:
-            CB.config.save_run({
-                "query": self._task_name,
-                "responses": self._responses, "links": self._links,
-                "step": {
-                    "action": action, "mode": self._mode(),
-                    "question": question,
-                    "models": [{"file": m["report"]["file"],
-                                "out_dir": m["out_dir"],
-                                "modified": m.get("modified", ""),
-                                "conversation": self._conversation_path(m)}
-                               for m in self.models],
-                },
-            })
+            self._run_path = CB.config.save_run(self._run_record(action))
+            self._loaded_run = self._run_path
+            self._last_action = action
         except Exception:                               # noqa: BLE001
             pass
+        if self._run_path:
+            self._live = None            # saved: the chat reads it from the record
+        self._refresh_runs()
+        self._refresh_chat(keep_live=True)
+        self._render_models()             # an edit's copy joins the list now
+        if self._stay_on_plan:
+            self._stay_on_plan = False
+        elif action in ("ask", "edit"):
+            self._show_tab(1)
+
+    @staticmethod
+    def _storable(report: dict) -> dict:
+        """The measurement without its CAD shapes, as plain JSON — so a run
+        reopened from History still has its numbers."""
+        plain = {k: v for k, v in report.items() if not str(k).startswith("_")}
+        try:
+            return json.loads(json.dumps(plain, default=str))
+        except (TypeError, ValueError):
+            return {}
+
+    def _notify_error(self, error: str):
+        """A problem, shown in the window — the status line and a notice on
+        the canvas — not a pop-up that takes the screen and says nothing about
+        what to do next."""
+        text = str(error or "").strip() or i18n.t("Something went wrong.")
+        self.status.setText("⚠  " + text)
+        self.canvas.toast("⚠  " + (text if len(text) < 140 else text[:137] + "…"),
+                          [], seconds=10)
 
     def _on_failed(self, error: str):
         self._set_busy(False, "")
-        QMessageBox.warning(self, "STEP", error)
+        self._render_models()
+        self._set_canvas()
+        self._notify_error(error)
         # A failure on one model must not strand the rest of the queue.
         if self._queue:
             self._next()
 
-    def _set_busy(self, busy: bool, message: str):
+    def _set_busy(self, busy: bool, message: str, stage: int | None = None):
+        self._busy = busy
+        if busy:
+            self.progress.set_message(message)
+            if stage is not None:
+                self.progress.set_stage(stage)
         self.progress.setVisible(busy)
-        self.generate_btn.setEnabled(not busy and bool(self.paths))
-        self.status.setText(message)
+        message_line = "" if busy else message   # the loader carries it while busy
+        self.generate_btn.setEnabled(
+            not busy and bool(self.paths) and not self._awaiting)
+        self.status.setText(message_line)
 
     def _open_folder(self):
         for m in self.models[:1]:

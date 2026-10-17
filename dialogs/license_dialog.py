@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel,
 
 import app_meta
 import i18n
+from widgets.loader import busy_button
 import licensing
 import theme
 from workers import _Worker
@@ -311,37 +312,85 @@ class LicenseDialog(PrismDialog):
         notice.setWordWrap(True)
         col.addWidget(notice)
 
-        links = QHBoxLayout()
-        links.setSpacing(theme.SPACE_2)
         self.terms_btn = C.button(i18n.t("Read Terms of Use"), "secondary",
                                   small=True, on_click=self._read_terms)
         self.privacy_btn = C.button(i18n.t("Read Privacy Policy"), "secondary",
                                     small=True, on_click=self._read_privacy)
-        links.addWidget(self.terms_btn)
-        links.addWidget(self.privacy_btn)
-        links.addStretch(1)
-        col.addLayout(links)
-
         self.terms_check = QCheckBox(i18n.t("I have read and agree to the Terms of Use."))
         self.privacy_check = QCheckBox(i18n.t(
             "I have read the Privacy Policy and understand this licence data use."))
+        self.terms_status = self._status_chip()
+        self.privacy_status = self._status_chip()
+        col.addWidget(self._doc_row("1", self.terms_btn, self.terms_status,
+                                    self.terms_check))
+        col.addWidget(self._doc_row("2", self.privacy_btn, self.privacy_status,
+                                    self.privacy_check))
+        hint = QLabel(i18n.t("Open each document first — its box unlocks "
+                             "once you have. Both are needed to activate."))
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {theme.NEUTRAL[500]}; font-size: 12px;")
+        col.addWidget(hint)
         self.terms_check.setEnabled(False)
         self.privacy_check.setEnabled(False)
         self.terms_check.toggled.connect(self._update_activation_ready)
         self.privacy_check.toggled.connect(self._update_activation_ready)
-        col.addWidget(self.terms_check)
-        col.addWidget(self.privacy_check)
         return wrap
+
+    @staticmethod
+    def _status_chip() -> QLabel:
+        chip = QLabel()
+        LicenseDialog._set_status(chip, False)
+        return chip
+
+    @staticmethod
+    def _set_status(chip: QLabel, read: bool):
+        chip.setText(i18n.t("✓ Read") if read else i18n.t("Not read yet"))
+        bg, ink = (("#f0fdf4", "#15803d") if read
+                   else (theme.NEUTRAL[200], theme.NEUTRAL[600]))
+        chip.setStyleSheet(
+            f"background: {bg}; color: {ink}; border-radius: 6px;"
+            " padding: 2px 8px; font-size: 11.5px; font-weight: 700;")
+
+    @staticmethod
+    def _doc_row(number: str, button, status: QLabel, check) -> QWidget:
+        """One document: a numbered step with its Read button and whether it
+        has been read, and the agreement box underneath."""
+        row = QFrame()
+        row.setObjectName("licDoc")
+        row.setAttribute(Qt.WA_StyledBackground, True)
+        row.setStyleSheet(
+            "#licDoc { background: #ffffff; border: 1px solid "
+            f"{theme.NEUTRAL[200]}; border-radius: 10px; }}")
+        lay = QVBoxLayout(row)
+        lay.setContentsMargins(theme.SPACE_3, theme.SPACE_2,
+                               theme.SPACE_3, theme.SPACE_2)
+        lay.setSpacing(theme.SPACE_2)
+        top = QHBoxLayout()
+        top.setSpacing(theme.SPACE_2)
+        dot = QLabel(number)
+        dot.setAlignment(Qt.AlignCenter)
+        dot.setFixedSize(22, 22)
+        dot.setStyleSheet(f"background: {theme.ACCENT}; color: white;"
+                          " border-radius: 11px; font-weight: 700;")
+        top.addWidget(dot)
+        top.addWidget(button)
+        top.addWidget(status)
+        top.addStretch(1)
+        lay.addLayout(top)
+        lay.addWidget(check)
+        return row
 
     def _read_terms(self):
         self._open_legal(i18n.t("Terms of Use"), "TERMS_OF_USE.md")
         self._terms_opened = True
         self.terms_check.setEnabled(True)
+        self._set_status(self.terms_status, True)
 
     def _read_privacy(self):
         self._open_legal(i18n.t("Privacy Policy"), "PRIVACY_POLICY.md")
         self._privacy_opened = True
         self.privacy_check.setEnabled(True)
+        self._set_status(self.privacy_status, True)
 
     def _open_legal(self, title: str, resource_name: str):
         # Local import avoids a widgets ↔ dialogs import cycle at start-up.
@@ -467,7 +516,7 @@ class LicenseDialog(PrismDialog):
         link.setMinimumHeight(C.MIN_TARGET)
         link.clicked.connect(self._email_us)
         row.addWidget(link)
-        row.addWidget(meta("· we usually reply the same working day"), stretch=1)
+        row.addWidget(meta("· replies the same working day"), stretch=1)
         return wrap
 
     def _unlocked(self) -> QWidget | None:
@@ -551,11 +600,9 @@ class LicenseDialog(PrismDialog):
         self.message.setVisible(True)
 
     def _busy(self, on: bool):
-        if on:
-            self.activate_btn.setEnabled(False)
-        else:
+        busy_button(self.activate_btn, on, i18n.t("Checking"))
+        if not on:
             self._update_activation_ready()
-        self.activate_btn.setText(i18n.t("Checking…") if on else i18n.t("Activate"))
         self.key_edit.setEnabled(not on)
 
     def _activate(self):

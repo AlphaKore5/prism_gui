@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
 import core_bridge as CB
 import email_config
 import i18n
+from widgets.loader import Loader
 import theme
 from dialogs.base import PrismDialog
 from addons.inquiry import autoquote, documents
@@ -1235,7 +1236,7 @@ class InquiryDialog(PipelineActions, PipelineScreen, QWidget):
         bar_row.setContentsMargins(0, 0, 0, 0)
         bar_row.setSpacing(theme.SPACE_2)
 
-        self.progress = C.WaveDotsProgress(bar)
+        self.progress = Loader("ring", compact=True, parent=bar)
         self.progress.setObjectName("inquiryProgress")
         self.progress.setRange(0, 0)   # indeterminate until we know count
         self.progress.setAccessibleName(i18n.t("Mailbox check progress"))
@@ -2500,7 +2501,29 @@ class InquiryDialog(PipelineActions, PipelineScreen, QWidget):
             max_reminders=int(settings.get("max_reminders", 3) or 3))
         self._worker.done.connect(self._account_checked)
         self._worker.failed.connect(self._account_failed)
+        self._worker.progress.connect(self._on_check_progress)
         self._worker.start()
+
+    def _on_check_progress(self, stage: str, done: int, total: int):
+        """How far this mailbox's check has got: a real count once the mails
+        are fetched, so the ring fills instead of spinning blind."""
+        who = ""
+        if len(self._queue) > 1:
+            who = self._queue[self._queue_pos].get("address", "") + " — "
+        if stage == "fetch":
+            text = i18n.t("Reading your inbox…")
+        elif stage == "sort":
+            if total == 0:
+                text = i18n.t("No new mail.")
+            else:
+                text = i18n.t("Sorting {n} new mails…").replace("{n}", str(total))
+        else:
+            text = i18n.t("Filing mail {i} of {n}…").replace(
+                "{i}", str(done)).replace("{n}", str(total))
+        if total:
+            self.progress.setRange(0, total)
+            self.progress.setValue(done if stage == "file" else 0)
+        self.status.setText(who + text)
 
     def _account_failed(self, message: str):
         """mailflow.check() promises never to raise; this is the seatbelt for
@@ -2534,6 +2557,10 @@ class InquiryDialog(PipelineActions, PipelineScreen, QWidget):
 
         register_locked = bool(result.error) and "Excel" in result.error
         self._queue_pos += 1
+        if len(self._queue) > 1:
+            self.progress.setRange(0, len(self._queue))
+        else:
+            self.progress.setRange(0, 0)
         self.progress.setValue(self._queue_pos)
         if register_locked:
             # The same locked file would refuse every account after this one,

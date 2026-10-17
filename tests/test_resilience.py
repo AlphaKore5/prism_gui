@@ -100,6 +100,16 @@ class GroqSurvival(unittest.TestCase):
             R.groq_chat("k", "gone-model", "hi")
         self.assertTrue(remembered.called)
 
+    def test_no_preferred_model_is_not_a_retirement(self):
+        """The mail check calls with no model named; the chain's first entry
+        answering is not "the saved model is gone" and must not warn or write
+        the config on every call (seen 2026-10-15: dozens of warnings per check)."""
+        with mock.patch.object(R.ui, "warn") as warned, \
+             mock.patch("core.config.save") as saved:
+            R._remember_model("openai/gpt-oss-120b", "")
+        self.assertFalse(warned.called)
+        self.assertFalse(saved.called)
+
     def test_a_rate_limit_waits_and_retries(self):
         calls = []
 

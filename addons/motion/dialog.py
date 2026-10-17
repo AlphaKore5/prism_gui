@@ -15,7 +15,7 @@ import time
 
 from PySide6.QtCore import QUrl, Signal
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QMessageBox, QProgressBar, QLabel, QPlainTextEdit
+from PySide6.QtWidgets import QMessageBox, QLabel, QPlainTextEdit
 
 import core_bridge as CB
 import i18n
@@ -23,6 +23,7 @@ import theme
 import wakeword
 from dialogs.base import PrismDialog
 from workers import AutomationWorker, RecordWorker, MotionWorker
+from widgets.loader import Loader
 from widgets.ask_panel import AskPanel
 
 
@@ -92,7 +93,7 @@ class MotionDialog(PrismDialog):
             f" font-size: 13px;")
         root.addWidget(self.brand_label)
 
-        self.progress = QProgressBar()
+        self.progress = Loader("stages", [i18n.t(n) for n in ['Storyboard', 'Render']])
         self.progress.setVisible(False)
         root.addWidget(self.progress)
 
@@ -250,6 +251,7 @@ class MotionDialog(PrismDialog):
             return
         self.request = request
 
+        self.progress.set_stage(0)
         self._busy(True, f"{writer} is planning the storyboard…")
         prompt = self.motion_generate.storyboard_instructions(
             request, self.brand, skeleton="cinematic_glass")
@@ -267,6 +269,7 @@ class MotionDialog(PrismDialog):
     def _on_motion_event(self, kind: str, payload: dict):
         if kind == "motion_scene":
             n, total = payload.get("index", 0) + 1, payload.get("total", 0)
+            self.progress.set_stage(0)
             self._busy(True, f"Writing scene {n} of {total} — "
                              "each one is written and checked on its own.")
             if total:
@@ -315,6 +318,7 @@ class MotionDialog(PrismDialog):
             indent=2)
 
         self.progress.setRange(0, 100)
+        self.progress.set_stage(1)
         self._busy(True, f"Rendering {len(scenes)} scenes, {dur:.0f}s, "
                          "1080x1920…")
         self._render_worker = MotionWorker(spec, self.out_path)
@@ -401,6 +405,7 @@ class MotionDialog(PrismDialog):
         prompt = studio.followup_prompt(change, selection, self.spec)
         self._refine_scene = int(selection.get("scene_index", 0) or 0)
         self._stop_editor()
+        self.progress.set_stage(0)
         self._busy(True, i18n.t("{agent} is rewriting scene {n}…").format(
             agent=writer, n=self._refine_scene + 1))
         self._followup_worker = AutomationWorker(
@@ -478,11 +483,13 @@ class MotionDialog(PrismDialog):
         QMessageBox.warning(self, "Motion Graphics", error)
 
     def _busy(self, busy: bool, message: str):
+        if busy:
+            self.progress.set_message(message)
         self.progress.setVisible(busy)
         if busy and self.progress.maximum() == 0:
             self.progress.setRange(0, 0)
         self.run_btn.setEnabled(not busy)
-        self.status.setText(message)
+        self.status.setText("" if busy else message)   # the loader carries it while busy
 
     # ── output ──────────────────────────────────────────────────────────
 
