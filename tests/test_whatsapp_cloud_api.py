@@ -3,8 +3,12 @@ so no socket is opened and the suite stays network-free."""
 from __future__ import annotations
 
 import json
+import os
+import sys
 
 import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from addons.whatsapp.cloud_api import (
     WhatsAppError, register_number, send_template, send_text,

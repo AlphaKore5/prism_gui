@@ -1,13 +1,14 @@
-"""WhatsApp — your team's inbox, contacts and broadcasts, in Prism.
+"""WhatsApp — your team's inbox, contacts, campaigns, automations, shop and forms, in Prism.
 
-n8n (its own always-on host) is the WhatsApp engine — Meta credentials, the AI
-conversation bot, the sends. Prism is the workspace on top of it: a rail
-add-on like Leads, whose whole surface lives in the window
-(addons/whatsapp/panel.py → workbench.py). Every read and send goes through
-the licence server (addons/whatsapp/license_client.py), so no Supabase key or
-n8n URL ever sits on a customer's computer. cloud_api.py + webhook.py are the
-older direct-Meta path, kept for Settings' manual test send and for a gateway
-process, should Prism ever run one itself.
+prism-wa (its own always-on service, reached only through the licence server)
+is the WhatsApp engine — Meta credentials, sending, the chatbot and AI agents,
+campaigns, payments. Prism is the workspace on top of it: a rail add-on like
+Leads, whose whole surface lives in the window (addons/whatsapp/panel.py →
+workbench.py). Every read and send goes through the licence server
+(addons/whatsapp/license_client.py), so no Meta token, Supabase key or service
+address ever sits on a customer's computer. Where the licence server has no
+prism-wa configured it still answers the older routes through n8n. cloud_api.py
++ webhook.py are the older direct-Meta path, kept for Settings' manual test send.
 
 STDLIB ONLY, like the rest of the manifest layer.
 """

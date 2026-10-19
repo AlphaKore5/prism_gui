@@ -36,7 +36,7 @@ class WhatsAppPanel(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
-        self.broadcast_btn = C.button(i18n.t("New broadcast"), "primary",
+        self.broadcast_btn = C.button(i18n.t("New campaign"), "primary",
                                       on_click=self.new_broadcast)
         self.header = C.PageHeader(
             i18n.t(self.TITLE), i18n.t(self.BLURB), [
@@ -82,8 +82,8 @@ class WhatsAppPanel(QWidget):
     def new_broadcast(self):
         if self._workbench is None:
             self._build()
-        from addons.whatsapp.workbench import _BROADCASTS
-        self._workbench.show_tab(_BROADCASTS)
+        from addons.whatsapp.workbench import _CAMPAIGNS
+        self._workbench.show_tab(_CAMPAIGNS)
 
     def refresh(self):
         if self._workbench is not None:

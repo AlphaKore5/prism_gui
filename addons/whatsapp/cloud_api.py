@@ -106,8 +106,9 @@ def send_text(phone_number_id: str, token: str, to: str, body: str, *,
     Only valid inside an open 24-hour service window (a reply to something the
     customer sent us). To OPEN a conversation Meta requires a pre-approved
     template — that is `send_template`."""
+    to_digits = "".join(c for c in str(to) if c.isdigit()) or str(to)
     return _send(phone_number_id, token,
-                 {"to": to, "type": "text",
+                 {"to": to_digits, "type": "text",
                   "text": {"preview_url": preview_url, "body": body}},
                  api_version=api_version, transport=transport)
 
@@ -125,8 +126,9 @@ def send_template(phone_number_id: str, token: str, to: str, name: str, *,
     template: dict = {"name": name, "language": {"code": language}}
     if components:
         template["components"] = components
+    to_digits = "".join(c for c in str(to) if c.isdigit()) or str(to)
     return _send(phone_number_id, token,
-                 {"to": to, "type": "template", "template": template},
+                 {"to": to_digits, "type": "template", "template": template},
                  api_version=api_version, transport=transport)
 
 

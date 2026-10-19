@@ -217,3 +217,9 @@ def handle(endpoint: str, body: dict) -> dict:
         return {"campaign": camp, "audience_size": n}
 
     raise KeyError(endpoint)
+
+
+def handle_platform(route: str, data: dict) -> dict:
+    """Answer one /v1/whatsapp/p/<route> call from memory (see demo_platform.py)."""
+    from addons.whatsapp import demo_platform
+    return demo_platform.handle(route, data)

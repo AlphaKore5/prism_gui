@@ -282,3 +282,37 @@ def _isolate_ambient_state(request):
                 f"public_keys() out of whichever test runs next, and write "
                 f"where it is told. Join it in the test that starts it.",
                 stacklevel=1)
+
+
+class _NoServer:
+    """A stand-in for a platform call that answers 'no server' at once, on the calling thread."""
+
+    class _Sig:
+        def __init__(self):
+            self.fns = []
+
+        def connect(self, fn):
+            self.fns.append(fn)
+
+    def __init__(self, route, data=None):
+        self.route, self.data = route, dict(data or {})
+        self.done, self.failed = self._Sig(), self._Sig()
+
+    def start(self):
+        for fn in list(self.failed.fns):
+            fn("There is no server in a test.", {})
+
+
+@pytest.fixture(autouse=True)
+def _a_platform_call_never_reaches_the_network(monkeypatch):
+    """The WhatsApp screens make their server calls through addons.whatsapp.ui.call. Left alone, a test that builds one of
+    those screens would start a real worker thread that tries to reach the licence server — the same leak, from the same
+    kind of thread, that section 2 above describes. So every such call is answered with an immediate "no server" failure;
+    a test that wants real answers patches ui.PlatformWorker itself (tests/test_whatsapp_platform_ui.py does)."""
+    try:
+        from addons.whatsapp import ui
+    except Exception:                                   # noqa: BLE001  (a test run without the GUI libraries)
+        yield
+        return
+    monkeypatch.setattr(ui, "PlatformWorker", _NoServer)
+    yield

@@ -147,6 +147,19 @@ def _plate(p: QPainter, option, rect: QRectF) -> None:
         p.drawRoundedRect(rect, theme.R_CONTROL, theme.R_CONTROL)
 
 
+def state_tag(row: dict):
+    """(words, colour) for a chat that is not just with the bot, else None. Literal i18n.t calls, for the string extractor."""
+    status = row.get("status")
+    if status == "requesting":
+        return i18n.t("Needs a person"), theme.WARN_INK
+    if status in ("intervened", "human_takeover"):
+        who = row.get("assignee_name")
+        return (i18n.t("With {w}").format(w=who) if who else i18n.t("With an agent")), theme.INFO_INK
+    if status == "closed":
+        return i18n.t("Resolved"), theme.NEUTRAL[500]
+    return None
+
+
 class ConversationDelegate(QStyledItemDelegate):
     """One inbox row: avatar · name / time · last message / unread dot.
 
@@ -196,13 +209,24 @@ class ConversationDelegate(QStyledItemDelegate):
         elif row.get("last_direction") == "out":
             text = i18n.t("You: ") + text
         pfont = _font(13, 600 if unread else 400)
-        p.setFont(pfont)
-        p.setPen(QColor(theme.TEXT if unread else theme.NEUTRAL[600]))
         reserve = 22 if unread else 0
         prev_w = right - left - reserve
-        prev = QFontMetrics(pfont).elidedText(text, Qt.ElideRight, int(max(20, prev_w)))
         line2 = r.top() + 37
-        p.drawText(QRectF(left, line2, prev_w, 18), Qt.AlignLeft | Qt.AlignVCenter, prev)
+        tag = state_tag(row)                       # "Needs a person" / "With Bala" / "Resolved" leads the line
+        if tag:
+            tfont2 = _font(12, 700)
+            p.setFont(tfont2)
+            p.setPen(QColor(tag[1]))
+            tag_w = min(int(QFontMetrics(tfont2).horizontalAdvance(tag[0])) + 8, int(prev_w * 0.6))
+            p.drawText(QRectF(left, line2, tag_w, 18), Qt.AlignLeft | Qt.AlignVCenter,
+                       QFontMetrics(tfont2).elidedText(tag[0], Qt.ElideRight, tag_w))
+            left_text, prev_w = left + tag_w, prev_w - tag_w
+        else:
+            left_text = left
+        p.setFont(pfont)
+        p.setPen(QColor(theme.TEXT if unread else theme.NEUTRAL[600]))
+        prev = QFontMetrics(pfont).elidedText(text, Qt.ElideRight, int(max(20, prev_w)))
+        p.drawText(QRectF(left_text, line2, prev_w, 18), Qt.AlignLeft | Qt.AlignVCenter, prev)
 
         if unread:
             p.setPen(Qt.NoPen)

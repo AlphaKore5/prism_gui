@@ -16,6 +16,7 @@ Two decisions worth knowing:
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 
 from PySide6.QtCore import QRect, Qt, QTimer, Signal
@@ -25,12 +26,15 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPlainTextEdit,
 
 import i18n
 import theme
+from addons.whatsapp import media_lib
 from addons.whatsapp.chat import clock, day_label, parse_ts
+from dialogs.base import PrismDialog
 from widgets import controls as C
 from widgets import icons
 
 _MAX_TEXT = 4096                      # the licence server's bound on a reply
 _GROUP_GAP = timedelta(minutes=3)
+_PLACEHOLDER = re.compile(r"^\[(image|video|audio|document|sticker)\]\s*")       # the words stored for a message that is only a file
 
 
 def _font(px: int, weight: int = 400) -> QFont:
@@ -120,6 +124,131 @@ class _Meta(QFrame):
             super().mousePressEvent(event)
 
 
+class _Picture(QLabel):
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        else:
+            super().mousePressEvent(event)
+
+
+class ImageViewer(PrismDialog):
+    """A picture from a chat at a readable size, with a way to keep a copy."""
+
+    def __init__(self, media: dict, data: bytes, parent=None):
+        super().__init__(media.get("filename") or media_lib.kind_name("image"), media_lib.size_text(media.get("size")), icon="image",
+                         parent=parent, closable=True)
+        pm = media_lib.pixmap_from(data)
+        view = QLabel()
+        view.setAlignment(Qt.AlignCenter)
+        if not pm.isNull():
+            view.setPixmap(pm.scaled(860, 560, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.body.addWidget(view, stretch=1)
+        self.footer.add_secondary(self.button(i18n.t("Save a copy"), on_click=lambda: media_lib.save_asset(
+            self, media, lambda m: C.show_toast(self, i18n.t("Couldn't save"), m))))
+        self.footer.set_primary(self.button(i18n.t("Close"), "primary", on_click=self.accept))
+
+
+class MediaBlock(QFrame):
+    """The file a message carries. A picture is shown in the bubble and opens large; anything else is a tile that opens in whatever
+    program handles it. A customer's file the service has not finished fetching says so, and the next poll fills it in."""
+
+    W = 264
+
+    def __init__(self, media: dict, parent=None):
+        super().__init__(parent)
+        self.media = media
+        self.setStyleSheet("background: transparent;")
+        col = QVBoxLayout(self)
+        col.setContentsMargins(0, 0, 0, 2)
+        col.setSpacing(0)
+        kind = media.get("kind") or "document"
+        self.picture = None
+        if not media.get("ready") or not media.get("id"):
+            col.addWidget(self._tile(kind, media_lib.kind_name(kind), i18n.t("Fetching the file…"), opens=False))
+        elif kind == "image" and int(media.get("size") or 0) <= 3 * 1024 * 1024:
+            self.picture = _Picture()
+            self.picture.setFixedSize(self.W, 150)
+            self.picture.setAlignment(Qt.AlignCenter)
+            self.picture.setCursor(Qt.PointingHandCursor)
+            self.picture.setToolTip(i18n.t("Click to open"))
+            self.picture.setStyleSheet(f"background: {theme.NEUTRAL[100]}; border-radius: 10px;")
+            self.picture.setPixmap(media_lib.tile_icon("image").pixmap(88, 88))
+            self.picture.clicked.connect(self._open_picture)
+            col.addWidget(self.picture)
+            media_lib.fetch(self, media["id"], self._picture_ready, failed=lambda _m, _d: None, max_bytes=3 * 1024 * 1024)
+        else:
+            sub = "%s · %s" % (media_lib.kind_name(kind), media_lib.size_text(media.get("size"))) if media.get("size") else media_lib.kind_name(kind)
+            col.addWidget(self._tile(kind, media.get("filename") or media_lib.kind_name(kind), sub, opens=True))
+
+    def _tile(self, kind: str, title: str, sub: str, opens: bool) -> QWidget:
+        tile = QFrame()
+        tile.setObjectName("waMediaTile")
+        tile.setAttribute(Qt.WA_StyledBackground, True)
+        tile.setStyleSheet("#waMediaTile { background: rgba(0,0,0,0.045); border-radius: 10px; }")
+        col = QVBoxLayout(tile)
+        col.setContentsMargins(10, 8, 8, 8)
+        col.setSpacing(6)
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        glyph = QLabel()
+        glyph.setFixedSize(30, 30)
+        glyph.setPixmap(icons.pixmap(media_lib.KIND_ICON.get(kind, "file"), 24, theme.NEUTRAL[700]))
+        row.addWidget(glyph)
+        text = QVBoxLayout()
+        text.setSpacing(0)
+        name = QLabel()
+        name.setFont(_font(13, 700))
+        name.setText(QFontMetrics(name.font()).elidedText(title, Qt.ElideMiddle, self.W - 74))      # a long file name keeps its start and its ending
+        name.setStyleSheet(f"color: {theme.TEXT}; background: transparent;")
+        name.setToolTip(title)
+        text.addWidget(name)
+        meta = QLabel(sub)
+        meta.setFont(_font(11, 500))
+        meta.setStyleSheet(f"color: {theme.NEUTRAL[600]}; background: transparent;")
+        text.addWidget(meta)
+        row.addLayout(text, stretch=1)
+        col.addLayout(row)
+        if opens:
+            actions = QHBoxLayout()
+            actions.setSpacing(6)
+            actions.addStretch(1)
+            actions.addWidget(C.button(i18n.t("Save a copy"), "tertiary", small=True, on_click=lambda: media_lib.save_asset(self, self.media, self._problem)))
+            actions.addWidget(C.button(i18n.t("Open"), "secondary", small=True, on_click=lambda: media_lib.open_asset(self, self.media, self._problem)))
+            col.addLayout(actions)
+        return tile
+
+    def _problem(self, message: str):
+        C.show_toast(self, i18n.t("Couldn't open the file"), message)
+
+    def _picture_ready(self, _meta, data):
+        try:
+            if not data or self.picture is None:
+                return
+            pm = media_lib.pixmap_from(data)
+            if pm.isNull():
+                return
+            fit = pm.scaled(self.W, 260, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.picture.setFixedSize(fit.width(), fit.height())
+            self.picture.setPixmap(fit)
+            self.picture.setStyleSheet("background: transparent; border-radius: 10px;")
+        except RuntimeError:                                        # the bubble was redrawn while the picture was on its way
+            return
+
+    def _open_picture(self):
+        media_lib.fetch(self, self.media["id"], self._show_picture, failed=lambda m, _d: self._problem(m))
+
+    def _show_picture(self, meta, data):
+        try:
+            if data is None:
+                return self._problem(i18n.t("That picture is too big to open from here."))
+            ImageViewer({**self.media, **{k: v for k, v in (meta or {}).items() if v}}, data, self.window()).exec()
+        except RuntimeError:
+            return
+
+
 class Bubble(QFrame):
     retry = Signal(object)                  # this bubble
 
@@ -150,11 +279,19 @@ class Bubble(QFrame):
             cap.setFont(_font(11, 700))
             cap.setStyleSheet(f"color: {theme.OK_INK}; background: transparent;")
             col.addWidget(cap)
-        self.body = QLabel(msg.get("text") or "")
+        media = msg.get("media") or None
+        self.media_block = MediaBlock(media) if media and (media.get("id") or media.get("wa_id")) else None
+        if self.media_block is not None:
+            col.addWidget(self.media_block)
+        text = msg.get("text") or ""
+        if self.media_block is not None:
+            text = _PLACEHOLDER.sub("", text)                    # a bare "[image]" is the file itself, not words
+        self.body = QLabel(text)
         self.body.setFont(_font(14))
         self.body.setWordWrap(True)
         self.body.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.body.setStyleSheet(f"color: {theme.TEXT}; background: transparent;")
+        self.body.setVisible(bool(text) or self.media_block is None)
         col.addWidget(self.body)
         self.meta = _Meta()
         self.meta.clicked.connect(lambda: self.retry.emit(self))
@@ -173,7 +310,11 @@ class Bubble(QFrame):
         rect = fm.boundingRect(QRect(0, 0, max_text, 100000),
                                Qt.TextWordWrap | Qt.AlignLeft, text)
         meta_w = self.meta.sizeHint().width() + 4
-        self.body.setFixedWidth(max(min(max_text, rect.width() + 4), meta_w))
+        wide = max(min(max_text, rect.width() + 4), meta_w)
+        if self.media_block is not None:
+            self.media_block.setFixedWidth(min(MediaBlock.W, max_text))
+            wide = max(wide, self.media_block.width())
+        self.body.setFixedWidth(wide)
 
 
 class _DayChip(QLabel):
@@ -190,6 +331,7 @@ class MessageThread(QScrollArea):
     """A scrolling column of bubbles, pinned to the newest message."""
 
     retryRequested = Signal(str, object)    # text, the failed bubble
+    retryMediaRequested = Signal(object)    # a failed bubble that carried a file
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -205,6 +347,12 @@ class MessageThread(QScrollArea):
         self._col.setSpacing(0)
         self._bubbles: list[Bubble] = []
         self._signature = None
+        # While the person is at the bottom the thread stays there as the content grows: a picture that finishes loading, a window
+        # that was not laid out yet. Scrolling up lets go; scrolling back down picks it up again.
+        self._sticky = True
+        bar = self.verticalScrollBar()
+        bar.rangeChanged.connect(self._on_range)
+        bar.actionTriggered.connect(lambda _a: QTimer.singleShot(0, self._remember_sticky))
         # Messages typed here that the server has not confirmed. A FAILED one
         # must outlive a redraw: it is not in the server's thread, the composer
         # was already cleared, and dropping it would lose the person's words.
@@ -234,11 +382,12 @@ class MessageThread(QScrollArea):
     def set_messages(self, messages: list) -> bool:
         """Rebuild the thread. Returns False when nothing changed (so a poll
         that finds the same messages does not flicker or lose the scroll)."""
-        sig = tuple((m.get("created_at"), m.get("text"), m.get("status"))
+        sig = tuple((m.get("created_at"), m.get("text"), m.get("status"), (m.get("media") or {}).get("id"), (m.get("media") or {}).get("ready"))
                     for m in messages)
         if sig == self._signature:
             return False
         stick = self._at_bottom() or self._signature is None
+        self._sticky = stick
         self._signature = sig
         self._clear()
         failed = [m for m in self._pending_msgs if m.get("status") == "failed"]
@@ -304,12 +453,38 @@ class MessageThread(QScrollArea):
         if self._col.count() and self._col.itemAt(self._col.count() - 1).spacerItem():
             self._col.takeAt(self._col.count() - 1)
         self._add_row(bubble, Qt.AlignRight, gap=12 if len(self._bubbles) > 1 else 0)
+        self._sticky = True
         self._signature = None              # the next poll should redraw truthfully
         self._refit()
         QTimer.singleShot(0, self.scroll_to_bottom)
         return bubble
 
+    def add_pending_media(self, asset: dict, caption: str, sender: str = "") -> Bubble:
+        """A file typed into the chat, on screen at once like a text reply."""
+        now = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+        if not self._bubbles:
+            self._clear()
+        kind = asset.get("kind") or "document"
+        msg = {"direction": "out", "sender": sender, "text": ("[%s] %s" % (kind, caption)).strip(), "created_at": now, "status": "sending",
+               "media": {"id": asset.get("id"), "wa_id": None, "mime_type": asset.get("mime"), "kind": kind, "filename": asset.get("filename"),
+                         "size": asset.get("size"), "ready": True}}
+        self._pending_msgs.append(msg)
+        bubble = Bubble(msg, tail=True)
+        bubble.retry.connect(self._on_retry)
+        self._bubbles.append(bubble)
+        if self._col.count() and self._col.itemAt(self._col.count() - 1).spacerItem():
+            self._col.takeAt(self._col.count() - 1)
+        self._add_row(bubble, Qt.AlignRight, gap=12 if len(self._bubbles) > 1 else 0)
+        self._sticky = True
+        self._signature = None
+        self._refit()
+        QTimer.singleShot(0, self.scroll_to_bottom)
+        return bubble
+
     def _on_retry(self, bubble: Bubble):
+        if (bubble.msg.get("media") or {}).get("id"):
+            self.retryMediaRequested.emit(bubble)
+            return
         self.retryRequested.emit(bubble.body.text(), bubble)
 
     # -- geometry -----------------------------------------------------------------
@@ -322,6 +497,18 @@ class MessageThread(QScrollArea):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._refit()
+
+    def _on_range(self, _low: int, _high: int):
+        if self._sticky:
+            QTimer.singleShot(0, self._pin)              # after the layout has settled, not in the middle of it
+
+    def _pin(self):
+        if self._sticky:
+            self.scroll_to_bottom()
+            self.viewport().update()
+
+    def _remember_sticky(self):
+        self._sticky = self._at_bottom()
 
     def _at_bottom(self) -> bool:
         bar = self.verticalScrollBar()
@@ -348,6 +535,8 @@ class Composer(QFrame):
     Shift+Enter is a new line."""
 
     submitted = Signal(str)
+    submittedMedia = Signal(dict, str)      # the file from the library, and the words under it
+    attachRequested = Signal()
 
     MIN_H, MAX_H = 44, 136
 
@@ -361,10 +550,29 @@ class Composer(QFrame):
         row = QHBoxLayout(self)
         row.setContentsMargins(16, 4, 6, 4)
         row.setSpacing(theme.SPACE_2)
+        self._asset = None
+        self.attach_btn = C.icon_button("paperclip", i18n.t("Attach a picture, video, voice note or document"),
+                                        on_click=self.attachRequested.emit, colour=theme.NEUTRAL[600])
+        row.addWidget(self.attach_btn, alignment=Qt.AlignBottom)
+        self.chip = QFrame()
+        self.chip.setObjectName("waAttached")
+        self.chip.setAttribute(Qt.WA_StyledBackground, True)
+        self.chip.setStyleSheet(f"#waAttached {{ background: {theme.NEUTRAL[100]}; border-radius: 12px; }}")
+        chip_row = QHBoxLayout(self.chip)
+        chip_row.setContentsMargins(10, 2, 2, 2)
+        chip_row.setSpacing(4)
+        self.chip_name = QLabel("")
+        self.chip_name.setFont(_font(12, 600))
+        self.chip_name.setStyleSheet(f"color: {theme.TEXT}; background: transparent;")
+        chip_row.addWidget(self.chip_name)
+        chip_row.addWidget(C.icon_button("x", i18n.t("Remove the attachment"), on_click=self.clear_attachment, colour=theme.NEUTRAL[600]))
+        self.chip.hide()
+        row.addWidget(self.chip, alignment=Qt.AlignBottom)
         self.edit = _Entry()
         self.edit.setFrameShape(QFrame.NoFrame)
         self.edit.setFont(_font(14))
-        self.edit.setPlaceholderText(i18n.t("Type a message — Enter to send, Shift+Enter for a new line"))
+        self._placeholder = i18n.t("Type a message — Enter to send, Shift+Enter for a new line")
+        self.edit.setPlaceholderText(self._placeholder)
         self.edit.setStyleSheet("background: transparent; border: none;")
         self.edit.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.edit.submitted.connect(self._submit)
@@ -387,21 +595,55 @@ class Composer(QFrame):
         over = n > _MAX_TEXT
         self.count.setVisible(n > _MAX_TEXT - 300)
         self.count.setText(f"{n}/{_MAX_TEXT}")
-        self.send_btn.setEnabled(bool(self.edit.toPlainText().strip()) and not over
+        self.send_btn.setEnabled((bool(self.edit.toPlainText().strip()) or self._asset is not None) and not over
                                  and self.edit.isEnabled())
 
     def _submit(self):
         text = self.edit.toPlainText().strip()
-        if not text or len(text) > _MAX_TEXT or not self.edit.isEnabled():
+        if len(text) > _MAX_TEXT or not self.edit.isEnabled():
+            return
+        if self._asset is not None:
+            asset, self._asset = self._asset, None
+            self.edit.clear()
+            self._show_attachment()
+            self.submittedMedia.emit(asset, text[:1024])
+            return
+        if not text:
             return
         self.edit.clear()
         self.submitted.emit(text)
 
+    def set_attachment(self, asset) -> None:
+        """Attach a library file to the next send; the words typed become its caption."""
+        self._asset = dict(asset) if asset else None
+        self._show_attachment()
+        self.focus()
+
+    def attachment(self):
+        return self._asset
+
+    def clear_attachment(self) -> None:
+        self._asset = None
+        self._show_attachment()
+
+    def _show_attachment(self):
+        a = self._asset
+        self.chip.setVisible(a is not None)
+        if a is not None:
+            fm = QFontMetrics(self.chip_name.font())
+            self.chip_name.setText(fm.elidedText(a.get("filename") or media_lib.kind_name(a.get("kind")), Qt.ElideMiddle, 200))
+            self.chip_name.setToolTip("%s · %s" % (a.get("filename") or "", media_lib.size_text(a.get("size"))))
+        self.edit.setPlaceholderText(i18n.t("Add a caption (optional)") if a is not None else self._placeholder)
+        self._grow()
+
     def set_active(self, active: bool, placeholder: str = ""):
         self.edit.setEnabled(active)
-        self.send_btn.setEnabled(active and bool(self.edit.toPlainText().strip()))
+        self.attach_btn.setEnabled(active)
+        self.send_btn.setEnabled(active and (bool(self.edit.toPlainText().strip()) or self._asset is not None))
         if placeholder:
-            self.edit.setPlaceholderText(placeholder)
+            self._placeholder = placeholder
+            if self._asset is None:
+                self.edit.setPlaceholderText(placeholder)
 
     def focus(self):
         self.edit.setFocus(Qt.OtherFocusReason)

@@ -34,6 +34,17 @@ class WhatsAppError(Exception):
     this module, not licensing.client's."""
 
 
+class PlatformError(WhatsAppError):
+    """A platform call the server refused. `reason` is the machine-readable code
+    ("window_closed", "preflight_failed", "plan_feature"...) and `detail` carries
+    what the screen needs to explain it: a preflight report, template issues."""
+
+    def __init__(self, message: str, reason: str = "", detail: Optional[dict] = None):
+        super().__init__(message)
+        self.reason = reason
+        self.detail = detail or {}
+
+
 def _auth_body(**extra) -> dict:
     body = {
         "license_id": licensing.state().license_id,
@@ -122,3 +133,28 @@ def send_broadcast(*, template_name: str, language: str = "en_US",
                    tags: list = None, segment_name: str = "") -> dict:
     return _call("/broadcast", template_name=template_name, language=language,
                 tags=list(tags or []), segment_name=segment_name)
+
+
+# ── the platform: templates, campaigns, segments, contacts, the team inbox ───
+# One door for all of them: POST /v1/whatsapp/p/<area>/<action>. The server
+# puts in the workspace and who is asking; this side says only what it wants.
+
+def platform(route: str, **data) -> dict:
+    from addons.whatsapp import demo
+    timeout = data.pop("_timeout", None) or TIMEOUT                # a file up to 16 MB needs longer than a list does
+    from addons.whatsapp import sso_state                          # proof of a company sign-in, when the workspace asks for one (memory only)
+    if sso_state.token():
+        data.setdefault("sso_token", sso_state.token())
+    if demo.enabled():
+        return demo.handle_platform(route, data)
+    try:
+        return licensing.client.call(
+            "/v1/whatsapp/p/" + route, _auth_body(data=data),
+            app_version=app_meta.VERSION, timeout=timeout, retries=RETRIES)
+    except ServerError as e:
+        detail = dict(e.detail or {})
+        raise PlatformError(e.message, reason=str(detail.get("reason") or e.code), detail=detail) from e
+    except Unreachable:
+        raise PlatformError(
+            "Couldn't reach Prism's licence server for WhatsApp — check "
+            "this computer's internet connection and try again.") from None

@@ -3,7 +3,7 @@
 Same shape as Leads & Outreach: an underlined tab strip over a stacked page,
 each page built the first time it is opened so an unopened tab costs nothing.
 
-    Inbox · Contacts · Broadcasts · Settings
+    Inbox · Contacts · Templates · Campaigns · Automations · Ads · Shop · Forms · Analytics · Settings
 
 The strip's right edge carries the one thing worth glancing at without a click:
 whether this is live, demo data, or unreachable.
@@ -19,14 +19,15 @@ import theme
 from addons.whatsapp import demo
 from widgets import controls as C
 
-_INBOX, _CONTACTS, _BROADCASTS, _SETTINGS = range(4)
+_INBOX, _CONTACTS, _TEMPLATES, _CAMPAIGNS, _AUTOMATIONS, _ADS, _SHOP, _FORMS, _ANALYTICS, _SETTINGS = range(10)
 
 
 def _tab_names() -> tuple:
     # Literal i18n.t calls, not a loop over a tuple of names: the string
     # extractor only sees literals, and a tab it cannot see is one that stays
     # in English for every translated install.
-    return (i18n.t("Inbox"), i18n.t("Contacts"), i18n.t("Broadcasts"), i18n.t("Settings"))
+    return (i18n.t("Inbox"), i18n.t("Contacts"), i18n.t("Templates"), i18n.t("Campaigns"), i18n.t("Automations"),
+            i18n.t("Ads"), i18n.t("Shop"), i18n.t("Forms"), i18n.t("Analytics"), i18n.t("Settings"))
 
 
 class WhatsAppWorkbench(QWidget):
@@ -45,10 +46,33 @@ class WhatsAppWorkbench(QWidget):
         root.addWidget(self._tabstrip())
         self._stack = QStackedWidget()
         self._stack.setStyleSheet("QStackedWidget { background: transparent; }")
-        for _ in range(4):
+        for _ in range(len(_tab_names())):
             self._stack.addWidget(QWidget())        # placeholders, replaced on first open
         root.addWidget(self._stack, 1)
+        self._signing_in = False
+        from addons.whatsapp import sso_state
+        sso_state.NOTIFY.required.connect(self._on_sign_in_required)  # the workspace asks everyone to sign in with the company account
         self._select(_INBOX)
+
+    def _sign_in_dialog(self):
+        from addons.whatsapp.settings_sso import SignInDialog
+        return SignInDialog(self, required=True)
+
+    def _on_sign_in_required(self):
+        if self.isVisible():                                        # only the workspace on screen asks, never one that is hidden or gone
+            self._ask_sign_in()
+
+    def _ask_sign_in(self):
+        if self._signing_in:
+            return
+        self._signing_in = True
+        try:
+            if self._sign_in_dialog().exec():
+                page = self._pages.get(self._current)
+                if page is not None:
+                    page.activate()
+        finally:
+            self._signing_in = False
 
     # ── tab strip ────────────────────────────────────────────────────────────
     def _tabstrip(self) -> QWidget:
@@ -110,12 +134,39 @@ class WhatsAppWorkbench(QWidget):
             page.unreadChanged.connect(self._on_unread)
             page.statusChanged.connect(
                 lambda msg, err: self._set_connection("offline" if err else "live"))
+            page.orderRequested.connect(self._order_for)
+            page.formRequested.connect(self._form_for)
         elif index == _CONTACTS:
             from addons.whatsapp.contacts import ContactsPage
             page = ContactsPage(self.cfg)
-        elif index == _BROADCASTS:
-            from addons.whatsapp.broadcast import BroadcastPage
-            page = BroadcastPage(self.cfg)
+            page.broadcastRequested.connect(self._broadcast_to)
+            page.manageRequested.connect(self._open_settings_section)
+            page.orderRequested.connect(self._order_for)
+            page.formRequested.connect(self._form_for)
+        elif index == _TEMPLATES:
+            from addons.whatsapp.templates_page import TemplatesPage
+            page = TemplatesPage(self.cfg)
+            page.useTemplate.connect(self._use_template)
+        elif index == _CAMPAIGNS:
+            from addons.whatsapp.campaigns_page import CampaignsPage
+            page = CampaignsPage(self.cfg)
+            page.openTemplates.connect(lambda: self._select(_TEMPLATES))
+        elif index == _AUTOMATIONS:
+            from addons.whatsapp.automations_page import AutomationsPage
+            page = AutomationsPage(self.cfg)
+        elif index == _ADS:
+            from addons.whatsapp.ads_page import AdsPage
+            page = AdsPage(self.cfg)
+        elif index == _SHOP:
+            from addons.whatsapp.shop_page import ShopPage
+            page = ShopPage(self.cfg)
+        elif index == _FORMS:
+            from addons.whatsapp.forms_page import FormsPage
+            page = FormsPage(self.cfg)
+        elif index == _ANALYTICS:
+            from addons.whatsapp.analytics_page import AnalyticsPage
+            page = AnalyticsPage(self.cfg)
+            page.openSettings.connect(self._open_settings_section)
         else:
             from addons.whatsapp.settings import SettingsPage
             page = SettingsPage(self.cfg)
@@ -128,14 +179,48 @@ class WhatsAppWorkbench(QWidget):
 
     def _select(self, index: int):
         prev = self._pages.get(self._current)
-        if prev is not None and self._current == _INBOX:
-            prev.deactivate()
+        if prev is not None and hasattr(prev, "deactivate"):
+            prev.deactivate()                  # a page that refreshes itself stops when it is left
         self._current = index
         page = self._page(index)
         self._stack.setCurrentIndex(index)
         for k, b in enumerate(self._tab_buttons):
             self._style_tab(b, k == index)
         page.activate()
+
+    def _use_template(self, name: str):
+        """'Use in a campaign' on an approved template: open Campaigns with it chosen."""
+        self._select(_CAMPAIGNS)
+        page = self._pages.get(_CAMPAIGNS)
+        if page is not None:
+            page.choose_template(name)
+
+    def _broadcast_to(self, target: dict):
+        """'Broadcast' on a selection in Contacts: open Campaigns with exactly those people as the audience."""
+        self._select(_CAMPAIGNS)
+        page = self._pages.get(_CAMPAIGNS)
+        if page is not None and hasattr(page, "use_audience"):
+            page.use_audience(target)
+
+    def _order_for(self, contact: dict):
+        """'New order' on a person in the Inbox or Contacts: open the Shop's order form with them chosen."""
+        self._select(_SHOP)
+        page = self._pages.get(_SHOP)
+        if page is not None:
+            page.start_order_for(contact)
+
+    def _form_for(self, contact: dict):
+        """'Send a form…' on a person: open Forms and ask which published form to send them."""
+        self._select(_FORMS)
+        page = self._pages.get(_FORMS)
+        if page is not None:
+            page.send_to(contact)
+
+    def _open_settings_section(self, key: str):
+        self._select(_SETTINGS)
+        page = self._pages.get(_SETTINGS)
+        if page is not None:
+            page.show_section(key)
 
     def show_tab(self, index: int):
         self._select(index)
@@ -154,8 +239,8 @@ class WhatsAppWorkbench(QWidget):
             page.activate()
 
     def deactivate(self):
-        page = self._pages.get(_INBOX)
-        if page is not None:
+        page = self._pages.get(self._current)
+        if page is not None and hasattr(page, "deactivate"):
             page.deactivate()
 
     def refresh(self, cfg: dict):
