@@ -19,7 +19,7 @@ ChatGPT, Grok, Kimi, DeepSeek.
       change what Leads/Content/Visual offer. This was a pure move — list
       content is unchanged, both BOQ test files + BOQ pricing tests pass
       (55/55). The actual content change below is still **not done**.
-- [ ] Content not done — and bigger than a list edit for 3 of the 7 names.
+- [x] Content done (2026-10-21) — see the three jobs below, all shipped.
 
 Checked each requested writer agent against what the engine can actually
 drive (`prism_terminal/core/agents.py`, `core/router.py`, `core/automation.py`):
@@ -108,11 +108,17 @@ So this item is really three different-sized jobs:
            `tests/test_boq_dialog.py::DeepSeekIsARealRegisteredBrowserAgent`.
            288/288 BOQ+BOM+STEP+registry tests pass.
 
-Every writer agent from the owner's original list of seven is now done
-except **Gemini** (exists only for image generation today — needs a
-text-writing automation profile, not yet built). Confirm with the owner
-before starting that, since it touches a DIFFERENT existing registry entry
-(`AGENT_REGISTRY["Google Gemini"]`) rather than adding a new one.
+**Gemini done (2026-10-21).** A SEPARATE `AGENT_REGISTRY["Gemini"]` text
+entry, not a change to the existing `"Google Gemini"` image-maker one —
+`core.agents._MAKES` permanently tags `"Google Gemini"` as an image tool
+at module load, so reusing it for text would have made every BOQ write-up
+run look like an image request. Selectors verified live the same way as
+Grok/DeepSeek; confirmed directly that `is_maker()` is `False` for the
+new "Gemini" entry and still `True` for "Google Gemini". "Gemini" added
+to `addons/boq/agents.py:WRITER`.
+
+All seven writer agents from the owner's original 2026-10-20 list are
+now in `WRITER`, item 1 is fully done.
 
 Housekeeping note: live-verifying Grok and DeepSeek left a few real test
 conversations in the owner's own chat history on both sites ("What is
@@ -278,50 +284,87 @@ window, reopened afterward, **still fetches and shows the old
 `boq_quantities_1792531109.csv`**, never surfacing the new file the
 follow-up just made.
 
-- [ ] **Not done — not yet investigated.** Needs tracing where the
-      follow-up dialog's "What Prism produced" file list is actually built
-      from after a follow-up completes — almost certainly in
-      `addons/boq/dialog.py`'s `_on_followed_up` / wherever
-      `_offer_followup()` reads its file list from (likely `self._links` or
-      a saved-files list that only gets populated by the ORIGINAL `_write()`
-      run and is never updated/replaced by a follow-up's response).
+- [x] **Done (2026-10-21).** Root cause, once traced: nothing in
+      `addons/boq/dialog.py` ever tracked an AI-produced file at all — not
+      a bug specific to follow-ups. `_offer_followup()`'s artifacts list
+      was hardcoded to `self.csv_path`, the LOCALLY measured quantities
+      CSV made once before any AI runs, because that was the only file
+      path the dialog had ever held onto. A new `self._deliverable_path`
+      is now set from `AutomationWorker(files_out=...)` — a caller-owned
+      list the engine already appends every harvested file to (the same
+      mechanism `addons/step/dialog.py:_on_drafted` uses) — wired into the
+      write-up, recheck and follow-up calls alike. Whatever comes back is
+      copied into the run's own Artifacts folder via `CB.config.
+      save_artifact` and shown FIRST in the follow-up window, ahead of
+      (not instead of) the measured CSV. 2 new tests.
 
 ## 5. "Verify and remake" produces no file at all, in any format
 
-Noted 2026-10-21, from the owner, not yet implemented.
+Noted 2026-10-21, from the owner. **Done (2026-10-21).**
 
-**What happened:** pressing "Verify and remake" and letting it run produces
+**What happened:** pressing "Verify and remake" and letting it run produced
 no output file whatsoever — not a `.csv`, not a `.docx`, nothing.
 
 **Also requested:** a dedicated control to choose the output file format
-the owner wants (the run currently has no way to say "give me a `.docx`"
-vs. "give me a `.csv`" up front).
+the owner wants.
 
-- [ ] **Not done — not yet investigated.** Needs tracing what "Verify and
-      remake" (`_ask_recheck()` → the `"recheck"` stage) is actually
-      supposed to save on success, versus what `_write()`'s own path does
-      differently that a plain `_write()` run does produce a file. This may
-      be related to item 4 (both are about a file not reaching the owner
-      after something other than the original `_write()` call), or may be a
-      separate gap — don't assume either way before tracing both.
-- [ ] **Format picker — not designed yet.** Needs a decision on where this
-      control lives (a dropdown next to "Verify and remake" / the follow-up
-      box itself? a one-time setting? per-run?) and how it's threaded
-      through to the prompt/worker that actually produces the file.
+What shipped:
+  - A **"File format" picker** next to "Write with" — Let the tool decide
+    (default) / Word (.docx) / CSV / PDF.
+  - Root cause: `VERIFY_PROMPT` only ever asked the agent to check figures
+    against the drawing, never to produce a file — so there was never
+    anything for the engine's own file-harvesting to find, format picker
+    or not. Picking a format now appends one line to the prompt AND
+    promotes the stage to a `file`-kind step in the engine's own contract
+    system (`prism_terminal/core/contract.py`'s `_WRITING_STAGES`, which
+    `"recheck"`/`"followup"` were missing from entirely) — that system
+    already re-asks once for the file and, worst case, writes the
+    document itself out of the tool's own text, the same guarantee a
+    fresh write-up already had. Groq (in-house) is excluded: no browser
+    page, so no file to produce.
+  - 3 new tests (default adds nothing to the prompt, a chosen format adds
+    the request line, Groq never receives it).
 
 ## 6. "Verify and remake"'s progress window underestimates how long it takes
 
-Noted 2026-10-21, from the owner, not yet implemented.
+Noted 2026-10-21, from the owner. **Done (2026-10-21).**
 
 **What happened:** the live progress window for "Verify and remake" (the
-new `BoqRunDialog` from item 2) reads as if the step is short, but a real
-run — the agent has to scan the drawing file itself — can take on the order
-of 20 minutes to come back with an answer.
+`BoqRunDialog` from item 2) read as if the step was short, but a real run
+— the agent has to read the drawing itself — can take on the order of 20
+minutes to come back with an answer, with nothing on screen saying that
+was normal.
 
-- [ ] **Not done — not yet investigated.** Needs checking what in
-      `addons/boq/run_dialog.py` / `widgets/output_panel.py:StageCard` (the
-      elapsed clock, any ETA/timeline copy, `page_wait` or similar timeout
-      values in `AGENT_REGISTRY` for the chosen agent) currently implies a
-      short duration, and what the right fix is — likely just honest
-      "this can take a while" copy plus making sure nothing times the step
-      out early, rather than literally shortening anything.
+What shipped:
+  - `AutomationWorker` gains a raw `min_wait` passthrough, independent of
+    the existing `followup=True` (which already raises the ceiling to
+    `automation.FOLLOWUP_MIN_WAIT`, 8 minutes, for any follow-up) — a
+    caller that knows ONE particular stage is heavier can raise the floor
+    further without changing what `followup=True` otherwise does. BOQ's
+    "recheck" now gets a 20-minute floor; a plain "followup" keeps the
+    8-minute one.
+  - Both recheck and follow-up now pass `followup=True` where neither did
+    before — they previously got the SAME short, generic wait ceiling as
+    any other stage.
+  - `BoqRunDialog` takes an optional `note`, shown on the card up front:
+    "{agent} is reading the drawing itself, not just answering from
+    memory — this can take up to 20 minutes." for recheck specifically.
+  - 4 new tests (the wait floor for each stage, the note for each stage).
+
+Items 4-6 share one more fix, needed for the format picker and the real
+wait ceiling to reach the engine at all: `AutomationWorker`'s `query`
+argument for recheck/followup was a short internal label
+(`"recheck — <doc>"`), never the actual prompt text — so the engine's own
+`wants_file()` scan (which decides whether a stage owes a file) could
+never see a chosen format or the words "make it a docx" even typed
+directly into a follow-up. The real prompt is passed as `query` now.
+
+Tests: 19 new across `tests/test_boq_dialog.py` (14) and the earlier
+`tests/test_boq_run_dialog.py` (unchanged this round). Full BOQ+BOM+STEP+
+run_dialog suite green, plus a sweep of Gerber/Reel/Motion/email/
+worker_mandate since `workers.py` and `core/contract.py` are shared by
+every add-on, not just BOQ.
+
+All six items from the owner's 2026-10-20/21 list are now done, except
+item 3's "stage two" (handing Groq-inhouse's text answer to a second,
+user-chosen agent for file conversion) — still open, tracked above.
