@@ -981,11 +981,21 @@ class _Markdown(QTextBrowser):
     """An AI answer rendered as Markdown, sized to its content so the chat
     scrolls as one page instead of a box inside a box."""
 
-    _CSS = ("table { border-collapse: collapse; margin: 6px 0; }"
-            "th, td { border: 1px solid #d1d1d6; padding: 4px 8px; }"
+    # Sized at the app's own BODY level (15px, up from this box's old
+    # hardcoded 13px) — this is the one place an AI answer IS the screen,
+    # so it reads at the app's normal reading size, not a caption size.
+    _CSS = ("body { line-height: 1.5; }"
+            "p { margin: 0 0 10px 0; }"
+            "p:last-child { margin-bottom: 0; }"
+            "ul, ol { margin: 4px 0 10px 0; padding-left: 22px; }"
+            "li { margin-bottom: 5px; }"
+            "strong, b { font-weight: 700; }"
+            "table { border-collapse: collapse; margin: 10px 0; }"
+            "th, td { border: 1px solid #d1d1d6; padding: 6px 10px; }"
             "th { background-color: #f5f5f7; }"
-            "h1 { font-size: 17px; } h2 { font-size: 15px; } h3 { font-size: 14px; }"
-            "h1, h2, h3 { margin-top: 10px; margin-bottom: 4px; }"
+            "h1 { font-size: 20px; } h2 { font-size: 18px; } h3 { font-size: 16px; }"
+            "h1, h2, h3 { font-weight: 700; margin-top: 14px; margin-bottom: 6px; }"
+            "h1:first-child, h2:first-child, h3:first-child { margin-top: 0; }"
             "hr { color: #e5e5ea; }")
 
     def __init__(self, text: str, parent=None):
@@ -995,7 +1005,7 @@ class _Markdown(QTextBrowser):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setStyleSheet("background: transparent; border: none;"
-                           " font-size: 13px;")
+                           f" {theme.type_css('BODY')}")
         self.document().setDocumentMargin(2)
         self.document().setDefaultStyleSheet(self._CSS)
         self.setMarkdown(text)
@@ -1196,7 +1206,8 @@ class _Turn(QFrame):
             t = QLabel(text)
             t.setWordWrap(True)
             t.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            t.setStyleSheet("font-size: 13px; border: none; background: transparent;")
+            t.setStyleSheet(f"border: none; background: transparent;"
+                            f" {theme.type_css('BODY')}")
             lay.addWidget(t)
         return box
 
