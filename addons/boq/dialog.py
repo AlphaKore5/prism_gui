@@ -609,6 +609,9 @@ class BoqDialog(PrismDialog):
         """The priced grid as a CSV for the writer, or the measured quantities
         CSV when nothing is priced yet. Numbers only: the drawing never goes."""
         if self.mode == "boq" and self.price_table.boq() is not None:
+            # A fresh install has no runs folder yet; the export does not
+            # create it, so the first priced BOQ silently wrote nothing.
+            os.makedirs(CB.config.RUNS_DIR, exist_ok=True)
             path = os.path.join(CB.config.RUNS_DIR,
                                 f"boq_priced_reference_{int(time.time())}.csv")
             self.price_table.export("csv", path)

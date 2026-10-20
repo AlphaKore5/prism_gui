@@ -95,8 +95,14 @@ jobs:
       #
       # --timeout because a hung test burns the whole job's budget and reports
       # nothing, which is exactly the failure this suite has form for.
+      # One pytest process per test file (devtools/suite_runner.py), not one
+      # for all ~4,700 tests: on Windows and macOS a single native crash used
+      # to end the run at 30-60% with nothing reported after it. A crash now
+      # names its file and is retried once; everything else still reports.
+      # Known, explained failures live in devtools/ci_known_failures.txt;
+      # anything else fails the job.
       - name: Run the test suite
-        run: python -m pytest --timeout=300
+        run: python devtools/suite_runner.py --timeout 300
 
       - name: Scenario checks
         run: python -m devtools.scenarios

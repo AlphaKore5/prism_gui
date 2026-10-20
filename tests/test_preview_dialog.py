@@ -301,3 +301,35 @@ class AViewerThatCannotLoadFallsBackInsteadOfCrashing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TheXlsxPreviewReleasesItsFile(unittest.TestCase):
+    """A read-only openpyxl workbook holds its file open until closed. On
+    Windows that locks the .xlsx (Excel cannot save it, Prism cannot overwrite
+    or delete it) for as long as the preview is up — CI caught it as a
+    PermissionError [WinError 32] when the test's temp folder was cleaned up."""
+
+    def test_the_workbook_is_closed_after_the_preview_is_built(self):
+        from unittest import mock
+        import openpyxl
+        import tempfile
+        from dialogs.preview_dialog import PreviewDialog
+        folder = tempfile.mkdtemp()
+        path = os.path.join(folder, "sheet.xlsx")
+        wb = openpyxl.Workbook()
+        wb.active.append(["a", 1])
+        wb.save(path)
+        closed = []
+        real = openpyxl.load_workbook
+
+        def spy(*a, **k):
+            book = real(*a, **k)
+            original = book.close
+            book.close = lambda: (closed.append(1), original())[1]
+            return book
+
+        with mock.patch("openpyxl.load_workbook", spy):
+            dlg = PreviewDialog(path, "spreadsheet")
+            dlg.reject()
+        self.assertEqual(closed, [1])
+        os.remove(path)          # would raise PermissionError on Windows if still open

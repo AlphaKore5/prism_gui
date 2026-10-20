@@ -1163,6 +1163,9 @@ class KnowingARealFlatSizeSolvesTheKFactor(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        why = sample_jobs.missing("step_file_demo", "Assem1.STEP")
+        if why:
+            raise unittest.SkipTest(why)     # a real customer job, not on every machine
         real = sample_jobs.path("step_file_demo", "Assem1.STEP")
         cls.report = SF.analyse(real, mode="metal")
         cls.dlg = _dialog()

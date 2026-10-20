@@ -95,6 +95,13 @@ imageio-ffmpeg
 # missing), but bundled in every build so nobody meets that fallback.
 openpyxl
 
+# ── Google Drive picker (integrations/gdrive.py) ───────────────────────────
+# Imported lazily inside gdrive.py, so nothing but this file and the spec's
+# hard gate ever notice them. They were missing from every build, which is how
+# the Drive picker came to say "not installed" on a customer's machine.
+google-api-python-client
+google-auth-oauthlib
+
 # ── Licensing ───────────────────────────────────────────────────────────────
 # Ed25519 to verify licence tokens and authorisation leases, ChaCha20-Poly1305
 # to decrypt the engine payload. Chosen over PyNaCl because PyInstaller ships

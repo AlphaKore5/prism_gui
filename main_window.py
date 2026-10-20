@@ -411,7 +411,7 @@ class MainWindow(QMainWindow):
         # These cost nothing: refresh_licence_ui() reads the CACHED state and
         # touches the network never. Spread out because a cold host can take
         # 30-50s to answer, and the whole point is to catch the moment it does.
-        for delay_ms in (1500, 4000, 10_000, 30_000, 60_000):
+        for delay_ms in (1500, 4000, 10_000, 30_000, 60_000, 90_000, 150_000):
             QTimer.singleShot(delay_ms, self._repaint_licence)
 
     def _repaint_licence(self):
@@ -774,6 +774,14 @@ class MainWindow(QMainWindow):
             self.banner.setVisible(False)
             return
 
+        if (state.status in (licensing.STALE, licensing.GRACE)
+                and not licensing.refresh_settled()):
+            # The renewal launched at startup has not answered yet, so there is
+            # nothing true to say about the server. Say nothing; the early
+            # repaints below pick it up the moment it lands.
+            self.banner.setVisible(False)
+            return
+
         if state.status == licensing.STALE and state.usable:
             tone, icon_name = theme.NEUTRAL[600], "clock"
             days = state.stale_days_left
@@ -781,6 +789,10 @@ class MainWindow(QMainWindow):
                     f"Everything keeps working for about {days} more "
                     f"day{'s' if days != 1 else ''} — check this computer's "
                     "internet connection if this stays.")
+            # Already activated and still working: a key prompt here asks a
+            # paying customer to redo something they have done.
+            self._show_banner(text, tone, icon_name, button=False)
+            return
         elif state.status == licensing.STALE:
             tone, icon_name = theme.NEUTRAL[600], "clock"
             text = ("Prism hasn't been able to reach the licence server for a "
@@ -792,6 +804,8 @@ class MainWindow(QMainWindow):
             text = (f"Prism couldn't confirm your licence. It keeps working for "
                     f"about {days} more day{'s' if days != 1 else ''} — check "
                     f"this computer's internet connection.")
+            self._show_banner(text, tone, icon_name, button=False)
+            return
         elif state.status == licensing.TAMPERED:
             tone, icon_name = theme.ERR_INK, "lock"
             text = (state.message
@@ -827,13 +841,16 @@ class MainWindow(QMainWindow):
         }.get(state.status, i18n.t("No licence yet"))
 
     def _show_banner(self, text: str, tone: str, icon_name: str,
-                     action: tuple | None = None, alt: tuple | None = None):
+                     action: tuple | None = None, alt: tuple | None = None,
+                     button: bool = True):
         """`action` is (label, callable) for the banner's button; the default
         is the licence-key dialog, which every licence banner wants. `alt` is
         an optional second, quieter (label, callable) — the update banner's
-        "Not now" — and is hidden when absent."""
+        "Not now" — and is hidden when absent. `button=False` hides the
+        button altogether, for a notice the customer has nothing to act on."""
         label, fn = action or ("Enter a licence key", self._open_license_dialog)
         self._banner_btn.setText(label)
+        self._banner_btn.setVisible(button)
         self._banner_action = fn
         if alt:
             self._banner_alt.setText(alt[0])

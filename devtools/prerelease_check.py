@@ -216,35 +216,16 @@ def check_selftest() -> None:
 # ── 6 suite ───────────────────────────────────────────────────────────────
 def check_suite() -> None:
     print("6  full suite (one process per file — takes a while)")
-    import tempfile
-    import xml.etree.ElementTree as ET
-    known_path = ROOT / "devtools" / "prerelease_known_failures.txt"
-    known = {l.strip() for l in known_path.read_text(encoding="utf-8").splitlines()
-             if l.strip() and not l.lstrip().startswith("#")} if known_path.exists() else set()
-    env = dict(os.environ, QT_QPA_PLATFORM="offscreen")
-    for k in ("GTK_PATH", "GIO_MODULE_DIR", "GTK_EXE_PREFIX", "GTK_IM_MODULE_FILE",
-              "GSETTINGS_SCHEMA_DIR", "GTK_MODULES", "LOCPATH"):
-        env.pop(k, None)
-    if env.get("XDG_DATA_DIRS_VSCODE_SNAP_ORIG"):
-        env["XDG_DATA_DIRS"] = env["XDG_DATA_DIRS_VSCODE_SNAP_ORIG"]
-    out = Path(tempfile.mkdtemp(prefix="prism-suite-"))
-    new_failures, crashed, total = [], [], 0
-    for f in sorted((ROOT / "tests").glob("test_*.py")):
-        xml = out / f"{f.stem}.xml"
-        p = subprocess.run([PY, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-                            f"--junitxml={xml}", str(f)], cwd=ROOT, env=env,
-                           capture_output=True, text=True, timeout=1500)
-        if not xml.exists():
-            crashed.append(f"{f.name} (exit {p.returncode}) — the process died before reporting")
-            continue
-        for case in ET.parse(xml).getroot().iter("testcase"):
-            total += 1
-            if case.find("failure") is not None or case.find("error") is not None:
-                key = f"{f.name}::{case.get('classname', '').split('.')[-1]}::{case.get('name')}"
-                if key not in known:
-                    new_failures.append(key)
-    say(not crashed, f"every test file ran to the end ({total} tests)", "\n      ".join(crashed))
-    say(not new_failures, "no new failing test", "\n      ".join(new_failures[:40]))
+    # The same runner CI uses, so "green here" and "green on GitHub" mean the
+    # same thing. Known failures: devtools/ci_known_failures.txt.
+    p = subprocess.run([PY, str(ROOT / "devtools" / "suite_runner.py")], cwd=ROOT,
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace")
+    out = p.stdout
+    tail = "\n      ".join(l for l in out.splitlines()
+                           if l.startswith(("  ", "CRASH", "FAIL")))[-1500:]
+    summary = next((l for l in out.splitlines() if " tests in " in l), "")
+    say(p.returncode == 0, f"every test file ran, no new failure ({summary.strip()})", tail)
 
 
 MANUAL = """

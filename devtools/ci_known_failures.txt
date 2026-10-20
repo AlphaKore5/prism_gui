@@ -1,0 +1,10 @@
+# Failures CI already has, so a NEW one is visible. One entry per line:
+#   test_file.py::ClassName::test_name     (a test)
+#   crash:test_file.py                      (a file whose process dies)
+# Each needs a reason. Fix the cause, then delete the line — suite_runner.py
+# tells you when a known entry has started passing.
+
+# Windows runner, 2026-10-17: pypdf finds no text in the quotation PDF that
+# QPdfWriter/QTextDocument wrote there ('Acme Springs' not found in ''), so the
+# real PDF text on Windows is unverified. Needs a Windows machine to look at the
+# PDF; do not paper over it — it is the customer-facing quotation.

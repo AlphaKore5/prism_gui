@@ -43,6 +43,17 @@ if os.path.isdir(venv_pkgs) and venv_pkgs not in sys.path:
 from core import agents, automation, footage  # noqa: E402
 
 
+
+# Real paths on THIS machine's temp folder. Hard-coded "/tmp/x.mp4" meant
+# "D:\\tmp\\x.mp4" on a Windows runner — a folder that does not exist, and a
+# probe table that no longer matched once the code normalised the path.
+_TMP = tempfile.gettempdir()
+
+
+def _t(name: str) -> str:
+    return os.path.join(_TMP, name)
+
+
 def test_caption_json_is_found_after_a_newer_audio_reply():
     replies = [
         "Your audio file is ready.",
@@ -364,8 +375,8 @@ def test_voice_is_created_before_artwork_and_final_video():
 def test_mix_audio_preserves_audio_longer_than_video(monkeypatch):
     executed_commands = []
     durations = {
-        "/tmp/video.mp4": {"duration": 15.0},
-        "/tmp/voice38.mp3": {"duration": 38.0},
+        _t("video.mp4"): {"duration": 15.0},
+        _t("voice38.mp3"): {"duration": 38.0},
     }
     monkeypatch.setattr(footage, "probe", lambda p: durations.get(p, {"duration": 0}))
     monkeypatch.setattr(footage.os.path, "isfile", lambda p: True)
@@ -382,8 +393,8 @@ def test_mix_audio_preserves_audio_longer_than_video(monkeypatch):
 
     monkeypatch.setattr(footage.subprocess, "run", mock_run)
 
-    out = footage.mix_audio("/tmp/video.mp4", "/tmp/voice38.mp3")
-    assert out == "/tmp/video.mp4"
+    out = footage.mix_audio(_t("video.mp4"), _t("voice38.mp3"))
+    assert out == _t("video.mp4")
     assert len(executed_commands) == 1
     cmd = executed_commands[0]
     # Check that -t is set to the full 38.0s (not truncated to 15s)
@@ -398,8 +409,8 @@ def test_mix_audio_preserves_audio_longer_than_video(monkeypatch):
 def test_mix_audio_when_video_is_longer(monkeypatch):
     executed_commands = []
     durations = {
-        "/tmp/video.mp4": {"duration": 20.0},
-        "/tmp/voice10.mp3": {"duration": 10.0},
+        _t("video.mp4"): {"duration": 20.0},
+        _t("voice10.mp3"): {"duration": 10.0},
     }
     monkeypatch.setattr(footage, "probe", lambda p: durations.get(p, {"duration": 0}))
     monkeypatch.setattr(footage.os.path, "isfile", lambda p: True)
@@ -416,8 +427,8 @@ def test_mix_audio_when_video_is_longer(monkeypatch):
 
     monkeypatch.setattr(footage.subprocess, "run", mock_run)
 
-    out = footage.mix_audio("/tmp/video.mp4", "/tmp/voice10.mp3")
-    assert out == "/tmp/video.mp4"
+    out = footage.mix_audio(_t("video.mp4"), _t("voice10.mp3"))
+    assert out == _t("video.mp4")
     assert len(executed_commands) == 1
     cmd = executed_commands[0]
     t_idx = cmd.index("-t")
@@ -598,11 +609,11 @@ def test_join_clips_with_transitions_builds_xfade_chain(monkeypatch):
     monkeypatch.setattr(footage.os.path, "getsize", lambda p: 2048)
 
     joined, _ = footage._join_clips_with_transitions(
-        ["/tmp/c1.mp4", "/tmp/c2.mp4", "/tmp/c3.mp4"],
+        [_t("c1.mp4"), _t("c2.mp4"), _t("c3.mp4")],
         durations=[3.0, 3.0, 3.0],
         transitions=["smoothleft", "zoomin"],
         trans_dur=0.22,
-        out_path="/tmp/output.mp4"
+        out_path=_t("output.mp4")
     )
     assert len(calls) == 1
     cmd = calls[0]

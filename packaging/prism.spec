@@ -326,6 +326,31 @@ try:
 except ImportError:
     pass
 
+# ── Every dependency a sold feature needs must be installed, or no build ───
+# The try/except blocks below used to turn a missing package into a printed
+# line and a build that shipped anyway — which is how customers met "STEP not
+# installed", "Google Drive libraries not installed" and a Motion engine that
+# was absent. A packaging runner is under our control, so a missing package is
+# a runner bug to fix here, not a degraded feature to ship. This runs before
+# anything is analysed, and names every gap at once.
+import importlib.util as _ilu
+_REQUIRED = {
+    "cadquery": "STEP", "OCP": "STEP", "playwright": "Studio and Motion",
+    "imageio_ffmpeg": "Reel and Motion encoding", "keyring": "licence key storage",
+    "rapidocr_onnxruntime": "reading text in pictures", "onnxruntime": "reading text in pictures",
+    "pyaudio": "voice input", "shapely": "Gerber", "gerbonara": "Gerber",
+    "openpyxl": "Excel", "docx": "Word attachments", "pypdf": "PDF attachments",
+    "dns": "mail-server discovery", "ezdxf": "BOQ", "PIL": "Reel", "numpy": "BOQ",
+    "cryptography": "licensing", "certifi": "HTTPS trust",
+    "selenium": "browser automation", "undetected_chromedriver": "browser automation",
+    "googleapiclient": "Google Drive", "google_auth_oauthlib": "Google Drive",
+}
+_missing = [f"{m} ({why})" for m, why in _REQUIRED.items() if _ilu.find_spec(m) is None]
+if _missing:
+    raise SystemExit("Refusing to build: these packages are not installed on "
+                     "this runner, so the app would ship with features that "
+                     "say 'not installed':\n  " + "\n  ".join(_missing))
+
 # The Google Drive libraries are imported lazily inside integrations/gdrive.py,
 # so the analyser never sees them. Added only when they are actually installed
 # on the build machine: a build without them still ships, with the Drive picker

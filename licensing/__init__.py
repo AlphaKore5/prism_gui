@@ -580,6 +580,19 @@ def _refresh_lease_once() -> bool:
     return _store_lease(response)
 
 
+# False until the first renewal of this session has finished, whatever it
+# answered. The window is drawn from the token on disk while that renewal is
+# still in flight, and a token past its offline window used to be reported as
+# "couldn't reach the licence server" in the seconds before anyone had tried —
+# a claim about the network made without asking it.
+_refresh_settled = False
+
+
+def refresh_settled() -> bool:
+    """Has this session's first licence renewal finished (success or not)?"""
+    return _refresh_settled
+
+
 def refresh(blocking: bool = False,
             on_done: Callable[[], None] | None = None) -> LicenseState | None:
     """Renew the token and the lease. Returns immediately unless `blocking`.
@@ -600,8 +613,11 @@ def refresh(blocking: bool = False,
     """
     store.touch_clock(user_dir())
     if blocking:
-        result = _refresh_once()
-        _refresh_lease_once()
+        try:
+            result = _refresh_once()
+            _refresh_lease_once()
+        finally:
+            _mark_settled()
         _call_quietly(on_done)
         return result
     threading.Thread(target=_safe_refresh, args=(on_done,),
@@ -627,7 +643,13 @@ def _safe_refresh(on_done: Callable[[], None] | None = None) -> None:
         _refresh_lease_once()
     except Exception:                               # noqa: BLE001
         pass
+    _mark_settled()
     _call_quietly(on_done)
+
+
+def _mark_settled() -> None:
+    global _refresh_settled
+    _refresh_settled = True
 
 
 # ── live authorisation & metering ──────────────────────────────────────────

@@ -268,6 +268,7 @@ class PreviewDialog(PrismDialog):
         the original remains one click away in the default spreadsheet app.
         """
         tabs = QTabWidget()
+        book = None
         try:
             from openpyxl import load_workbook
             from openpyxl.utils import get_column_letter
@@ -290,6 +291,15 @@ class PreviewDialog(PrismDialog):
         except Exception as e:                            # corrupt or encrypted XLSX
             tabs.addTab(QLabel(i18n.t("This workbook could not be read.")
                                + f"\n\n{e}"), i18n.t("Preview"))
+        finally:
+            # A read-only workbook keeps its file open until closed. On
+            # Windows that locks the .xlsx: Excel cannot save it, Prism cannot
+            # overwrite or delete it, for as long as the preview exists.
+            try:
+                if book is not None:
+                    book.close()
+            except Exception:                             # noqa: BLE001
+                pass
         self.body.addWidget(tabs, stretch=1)
 
     def _build_presentation(self):

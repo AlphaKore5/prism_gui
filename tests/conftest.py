@@ -231,9 +231,12 @@ def _config_is_never_the_real_one(tmp_path_factory, monkeypatch):
     except Exception:                                   # noqa: BLE001
         yield
         return
-    monkeypatch.setattr(
-        config, "CONFIG_PATH",
-        str(tmp_path_factory.mktemp("cfg") / "config.json"))
+    cfg_dir = tmp_path_factory.mktemp("cfg")
+    monkeypatch.setattr(config, "CONFIG_PATH", str(cfg_dir / "config.json"))
+    # Not created: a fresh machine has no runs folder either, and code that
+    # writes into it must make it (the first priced BOQ did not, and failed
+    # only on CI, where the folder was absent).
+    monkeypatch.setattr(config, "RUNS_DIR", str(cfg_dir / "runs"))
     yield
 
 

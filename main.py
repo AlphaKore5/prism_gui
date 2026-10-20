@@ -226,6 +226,31 @@ def _selftest(app) -> int:
         # checkout without imageio-ffmpeg is normal, and Prism fetches it.
         checks.append((f"Reel encoding (FFmpeg)"
                        f"{'' if ffmpeg_ok else f' — {ffmpeg_err}'}", ffmpeg_ok))
+    # Every sold feature's own availability probe, fatal once frozen. Each
+    # of these says "not installed" to a customer when its package is absent,
+    # and none of them was checked here, so a build missing one passed every
+    # gate. From source an absent optional package is an ordinary state and is
+    # reported by the lines further down instead.
+    if paths.is_frozen():
+        import keyring
+        import googleapiclient   # noqa: F401
+        from integrations import gdrive
+        probes = [("Motion Graphics", CB.motion_available()),
+                  ("STEP", CB.step_available()),
+                  ("Gerber", CB.gerber_available()),
+                  ("reading text from pictures", CB.ocr_available()),
+                  ("Google Drive", gdrive.deps_available())]
+        if sys.platform in ("win32", "darwin"):
+            probes.append(("voice input", wakeword.available()))
+        try:
+            backend = keyring.get_keyring().__class__.__name__
+            keyring_ok = "fail" not in backend.lower()
+        except Exception:                               # noqa: BLE001
+            keyring_ok = False
+        probes.append(("OS credential store", (keyring_ok, "no keyring backend")))
+        for name, (ok, why) in probes:
+            checks.append((f"{name} available"
+                           f"{'' if ok else ' — ' + why.split(chr(10))[0]}", ok))
     checks.append((f"Studio editor + Motion runtime files"
                    f"{'' if assets_ok else f' — {assets_err}'}", assets_ok))
     from main_window import MainWindow

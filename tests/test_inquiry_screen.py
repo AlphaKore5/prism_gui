@@ -420,6 +420,14 @@ class TheLicenceGateStillHolds(unittest.TestCase):
         licensing.state = lambda: stale
         licensing.reload = lambda: stale
         win = main_window.MainWindow()
+        # While the startup renewal has not answered, the window must not
+        # claim the server is unreachable — nobody has asked it yet.
+        with mock.patch.object(licensing, "_refresh_settled", False):
+            win.refresh_licence_ui()
+            self.assertFalse(win.banner.isVisibleTo(win),
+                             "no network claim before the renewal has run")
+        licensing._refresh_settled = True
+        self.addCleanup(setattr, licensing, "_refresh_settled", False)
         win.refresh_licence_ui()
         # isVisibleTo, not isVisible: the window is never shown in tests, so
         # isVisible() is False regardless and would pass either way.
@@ -433,6 +441,29 @@ class TheLicenceGateStillHolds(unittest.TestCase):
         win._repaint_licence()
         self.assertFalse(win.banner.isVisibleTo(win),
                          "banner must go once the licence is valid again")
+
+    def test_a_usable_offline_licence_is_not_asked_for_a_key(self):
+        """Server off, licence still working offline: the banner informs and
+        offers no "Enter a licence key" — the customer is already activated."""
+        import time
+        import main_window
+
+        stale = LicenseState(status=licensing.STALE, plan="Growth",
+                             customer="Test", kind="team",
+                             features=frozenset({"core"}), seats=3,
+                             license_id="7F3A", license_ends=2 ** 31 - 1,
+                             token_expires=int(time.time()) - 3600,
+                             grace_days=7)
+        self.assertTrue(stale.usable)
+        licensing.state = lambda: stale
+        licensing.reload = lambda: stale
+        licensing._refresh_settled = True
+        self.addCleanup(setattr, licensing, "_refresh_settled", False)
+        win = main_window.MainWindow()
+        win.refresh_licence_ui()
+        self.assertTrue(win.banner.isVisibleTo(win))
+        self.assertFalse(win._banner_btn.isVisibleTo(win),
+                         "no key prompt while the licence still works offline")
 
     def test_the_repaint_is_actually_scheduled_soon_after_launch(self):
         """The method above is only half of it. The bug was that nothing
