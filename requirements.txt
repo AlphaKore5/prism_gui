@@ -157,3 +157,10 @@ dnspython
 # falls back to the OS reader on a Mac and says what is missing elsewhere),
 # bundled in every build so a Windows customer never meets that fallback.
 rapidocr-onnxruntime
+
+# rapidocr-onnxruntime asks only for opencv-python>=4.5, so a build floats to
+# whatever is newest. 5.0.0.93 arrived on 2026-10 and its macOS arm64 wheel
+# does not load inside the PyInstaller bundle (cv2 prints its search path and
+# the import fails), so RapidOCR was "not installed" in the macOS app while
+# Windows and Linux were fine. 4.x is the series every earlier build shipped.
+opencv-python<5

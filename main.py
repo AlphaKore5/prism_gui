@@ -248,6 +248,13 @@ def _selftest(app) -> int:
         except Exception:                               # noqa: BLE001
             keyring_ok = False
         probes.append(("OS credential store", (keyring_ok, "no keyring backend")))
+        # core.ocr swallows the import error and only says "pip install",
+        # which hides the real cause in a frozen build (a broken cv2 once).
+        if not probes[3][1][0]:
+            try:
+                import rapidocr_onnxruntime   # noqa: F401
+            except Exception as e:                      # noqa: BLE001
+                probes[3] = (probes[3][0], (False, f"{type(e).__name__}: {e}"))
         for name, (ok, why) in probes:
             checks.append((f"{name} available"
                            f"{'' if ok else ' — ' + why.split(chr(10))[0]}", ok))
