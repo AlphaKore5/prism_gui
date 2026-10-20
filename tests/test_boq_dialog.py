@@ -55,6 +55,61 @@ def _dialog(mode: str = "boq") -> BoqDialog:
     return BoqDialog(CFG, [], None, mode=mode)
 
 
+class _FakeSignal:
+    """A connect()/emit() pair with no Qt underneath -- enough for
+    _FakeRunDialog to stand in for a real Signal without needing a QObject."""
+
+    def __init__(self):
+        self._slots = []
+
+    def connect(self, fn):
+        self._slots.append(fn)
+
+    def emit(self, *a):
+        for fn in list(self._slots):
+            fn(*a)
+
+
+class _FakeRunDialog:
+    """Stands in for addons.boq.run_dialog.BoqRunDialog. Its exec() returns
+    immediately instead of opening a real modal -- a real one would block
+    forever in a test, since the mocked AutomationWorker below never fires
+    a signal to end it (CLAUDE.md: never call exec()/a QEventLoop in a
+    test). Every BOQ test that reaches _send_followup for a browser agent
+    (not Groq) must patch "addons.boq.run_dialog.BoqRunDialog" with this,
+    the same way existing tests already patch FollowupDialog."""
+
+    last = None
+
+    def __init__(self, title, stage, agent, parent=None, note=""):
+        self.title, self.stage, self.agent = title, stage, agent
+        self.note = note
+        self.exec_calls = 0
+        _FakeRunDialog.last = self
+        self.skip_requested = _FakeSignal()
+        self.fallback_requested = _FakeSignal()
+        self.stop_requested = _FakeSignal()
+
+    def exec(self):
+        self.exec_calls += 1
+        return 0
+
+    def set_agent(self, agent):
+        self.agent = agent
+
+    def finish_ok(self, texts, url=""):
+        pass
+
+    def finish_error(self, error, exhausted=True):
+        pass
+
+    def finish_skipped(self, reason=""):
+        pass
+
+    def finish_cancelled(self, note=""):
+        pass
+
+
 class TheRunTitleIsRecognisedByHistory(unittest.TestCase):
     """The regression test for the bug in this file's docstring."""
 
@@ -216,6 +271,7 @@ class TheDrawingGoesToAIOnlyAfterAYes(unittest.TestCase):
         from unittest import mock
         from addons.boq import dialog as BD
         with mock.patch.object(BD, "AutomationWorker", self._Capture), \
+                mock.patch("addons.boq.run_dialog.BoqRunDialog", _FakeRunDialog), \
                 mock.patch.object(BD.QMessageBox, "question",
                                   staticmethod(lambda *a, **k: answer)):
             self.d._ask_recheck()
@@ -291,7 +347,8 @@ class TheDrawingGoesToAIOnlyAfterAYes(unittest.TestCase):
     def test_verify_and_remake_asks_consent_and_sends_the_drawing(self):
         from unittest import mock
         from addons.boq import dialog as BD
-        with mock.patch.object(BD, "AutomationWorker", self._Capture):
+        with mock.patch.object(BD, "AutomationWorker", self._Capture), \
+                mock.patch("addons.boq.run_dialog.BoqRunDialog", _FakeRunDialog):
             self._offer(submitted=True, quick="verify", note="VERIFY")
         self.assertEqual(self._Capture.started, 1)
         files = self._Capture.seen["args"][2]
@@ -304,7 +361,8 @@ class TheDrawingGoesToAIOnlyAfterAYes(unittest.TestCase):
         extra = os.path.join(tempfile.mkdtemp(), "site_note.txt")
         with open(extra, "w") as fh:
             fh.write("gate is on the north side")
-        with mock.patch.object(BD, "AutomationWorker", self._Capture):
+        with mock.patch.object(BD, "AutomationWorker", self._Capture), \
+                mock.patch("addons.boq.run_dialog.BoqRunDialog", _FakeRunDialog):
             self._offer(submitted=True, quick="", note="add a gate", files=[extra])
         self.assertEqual(self._Capture.started, 1)
         files = self._Capture.seen["args"][2]
@@ -363,6 +421,533 @@ class TheWriterGetsThePricedCsvAsReferenceOnly(unittest.TestCase):
         prompt = self._Capture.seen["kwargs"]["custom_stages"][0][2][0]
         self.assertIn("REFERENCE ONLY", prompt)
         self.assertNotIn("/secret/site.dxf", prompt)
+
+
+class GroqInHouseIsADirectCallNotABrowserAgent(unittest.TestCase):
+    """"Groq" in the writer picker is not a browser agent like the rest of
+    addons.boq.agents.WRITER -- addons/boq/dialog.py routes it to
+    addons.boq.workers.BoqGroqWorker, a direct core.router.groq_chat call.
+    That call has no file upload at all, so every path that could otherwise
+    hand it a file (a template/notes attachment, the priced reference CSV,
+    the drawing itself for recheck) must refuse up front rather than
+    silently writing from less than the person attached."""
+
+    class _Capture:
+        seen = {}
+
+        def __init__(self, *a, **kw):
+            GroqInHouseIsADirectCallNotABrowserAgent._Capture.seen = {
+                "args": a, "kwargs": kw}
+            self.done = self.failed = self
+
+        def connect(self, *_):
+            pass
+
+        def start(self):
+            pass
+
+    def setUp(self):
+        self.d = _dialog()
+        self.d.summary = "WALLS 12.00 m"
+        self.d.request = "BOQ for the site"
+        self.d._task_name = "BOQ — sai"
+        self.d.writer_agent = "Groq"
+
+    def test_the_initial_write_goes_through_boqgroqworker_not_automationworker(self):
+        from unittest import mock
+        from addons.boq import dialog as BD
+        with mock.patch.object(BD, "BoqGroqWorker", self._Capture), \
+                mock.patch.object(BD, "AutomationWorker") as auto:
+            self.d._write()
+        auto.assert_not_called()
+        prompt = self._Capture.seen["args"][1]
+        self.assertIn("WALLS 12.00 m", prompt)
+
+    def test_groq_needs_its_own_key_even_if_some_other_agent_is_configured(self):
+        from unittest import mock
+        from addons.boq import dialog as BD
+        d = BD.BoqDialog({"api_key": ""}, [], None, mode="boq")
+        d.ask.set_text("500 brackets")
+        d.writer_combo.setCurrentText("Groq")
+        with mock.patch.object(BD.QMessageBox, "warning") as warn:
+            d._run()
+        warn.assert_called_once()
+        self.assertIsNone(d._worker)
+
+    def test_a_template_blocks_groq_before_anything_starts(self):
+        from unittest import mock
+        from addons.boq import dialog as BD
+        self.d.ask.set_text("500 brackets")
+        self.d.writer_combo.setCurrentText("Groq")
+        self.d.templates = [{"path": "/x/template.xlsx", "name": "template.xlsx"}]
+        with mock.patch.object(BD.QMessageBox, "warning") as warn:
+            self.d._run()
+        warn.assert_called_once()
+        self.assertIsNone(self.d._worker)
+
+    def test_a_priced_reference_blocks_groq_at_write_time(self):
+        from unittest import mock
+        from addons.boq import dialog as BD
+        self.d.q = {"layers": ["WALLS"], "lengths_by_layer": {"WALLS": 12.0},
+                    "areas_by_layer": {}, "block_counts": {}, "unit": "m",
+                    "scope_total_layers": 1}
+        self.d.price_table.set_quantities(self.d.q, title="BOQ")
+        with mock.patch.object(BD.QMessageBox, "warning") as warn:
+            self.d._write()
+        warn.assert_called_once()
+        self.assertIsNone(self.d._worker)
+
+    def test_recheck_refuses_groq_before_the_consent_popup_even_shows(self):
+        from unittest import mock
+        from addons.boq import dialog as BD
+        self.d.cad_path = "/secret/site.dxf"
+        self.d.result.setPlainText("1  Brick wall  12.00  m")
+        self.d.writer_combo.setCurrentText("Groq")
+        with mock.patch.object(self.d, "_drawing_consent") as consent, \
+                mock.patch.object(BD.QMessageBox, "warning") as warn:
+            self.d._ask_recheck()
+        consent.assert_not_called()
+        warn.assert_called_once()
+        self.assertIsNone(self.d._worker)
+
+    def test_a_typed_followup_with_an_attached_file_is_refused_for_groq(self):
+        from unittest import mock
+        from addons.boq import dialog as BD
+        self.d.writer_combo.setCurrentText("Groq")
+        self.d.result.setPlainText("1  Brick wall  12.00  m")
+        with mock.patch.object(BD.QMessageBox, "warning") as warn:
+            self.d._send_followup("add a gate",
+                                  [{"path": "/x/note.txt", "name": "note.txt"}],
+                                  verify=False)
+        warn.assert_called_once()
+        self.assertIsNone(self.d._worker)
+
+    def test_a_file_free_followup_reaches_boqgroqworker_with_its_own_stage(self):
+        from unittest import mock
+        from addons.boq import dialog as BD
+        self.d.writer_combo.setCurrentText("Groq")
+        self.d.result.setPlainText("1  Brick wall  12.00  m")
+        with mock.patch.object(BD, "BoqGroqWorker", self._Capture):
+            self.d._send_followup("make it metric", [], verify=False)
+        self.assertEqual(self._Capture.seen["kwargs"], {"stage": "followup"})
+
+
+class GrokIsARealRegisteredBrowserAgent(unittest.TestCase):
+    """"Grok" needs no BOQ-side special-casing like "Groq" does -- it is a
+    real prism_terminal.core.agents.AGENT_REGISTRY entry, so it just has to
+    resolve, be offered in the picker, and go through the ordinary
+    AutomationWorker path every other browser agent already does."""
+
+    def test_grok_is_in_the_writer_pool(self):
+        from addons.boq import agents as boq_agents
+        self.assertIn("Grok", boq_agents.WRITER)
+
+    def test_grok_resolves_to_a_profile_with_every_selector_the_write_stage_needs(self):
+        import core_bridge as CB
+        entry = CB.agents.resolve_agent("", "Grok")
+        self.assertIsNotNone(entry)
+        for key in ("url", "textarea_selector", "response_selector",
+                    "submit_selector"):
+            self.assertTrue(entry.get(key), f"missing {key}")
+        self.assertEqual(entry["url"], "https://grok.com")
+
+    def test_grok_goes_through_automationworker_like_any_other_browser_agent(self):
+        from unittest import mock
+        from addons.boq import dialog as BD
+
+        class _Capture:
+            seen = {}
+
+            def __init__(self, *a, **kw):
+                _Capture.seen = {"args": a, "kwargs": kw}
+                self.done = self.failed = self
+
+            def connect(self, *_):
+                pass
+
+            def start(self):
+                pass
+
+        d = _dialog()
+        d.summary = "WALLS 12.00 m"
+        d.request = "BOQ for the site"
+        d._task_name = "BOQ — sai"
+        d.writer_agent = "Grok"
+        with mock.patch.object(BD, "AutomationWorker", _Capture), \
+                mock.patch.object(BD, "BoqGroqWorker") as groq_worker:
+            d._write()
+        groq_worker.assert_not_called()
+        self.assertEqual(_Capture.seen["kwargs"]["custom_stages"][0][:2],
+                         ("format", "Grok"))
+
+
+class DeepSeekIsARealRegisteredBrowserAgent(unittest.TestCase):
+    """Same story as Grok above: "DeepSeek" is a real AGENT_REGISTRY entry
+    (verified live once the owner logged into chat.deepseek.com themselves,
+    2026-10-20), not an API shortcut, so it needs no BOQ-side special-casing
+    either -- just the ordinary AutomationWorker path."""
+
+    def test_deepseek_is_in_the_writer_pool(self):
+        from addons.boq import agents as boq_agents
+        self.assertIn("DeepSeek", boq_agents.WRITER)
+
+    def test_deepseek_resolves_to_a_profile_with_every_selector_the_write_stage_needs(self):
+        import core_bridge as CB
+        entry = CB.agents.resolve_agent("", "DeepSeek")
+        self.assertIsNotNone(entry)
+        for key in ("url", "textarea_selector", "response_selector",
+                    "submit_selector"):
+            self.assertTrue(entry.get(key), f"missing {key}")
+        self.assertEqual(entry["url"], "https://chat.deepseek.com")
+
+    def test_deepseek_goes_through_automationworker_like_any_other_browser_agent(self):
+        from unittest import mock
+        from addons.boq import dialog as BD
+
+        class _Capture:
+            seen = {}
+
+            def __init__(self, *a, **kw):
+                _Capture.seen = {"args": a, "kwargs": kw}
+                self.done = self.failed = self
+
+            def connect(self, *_):
+                pass
+
+            def start(self):
+                pass
+
+        d = _dialog()
+        d.summary = "WALLS 12.00 m"
+        d.request = "BOQ for the site"
+        d._task_name = "BOQ — sai"
+        d.writer_agent = "DeepSeek"
+        with mock.patch.object(BD, "AutomationWorker", _Capture), \
+                mock.patch.object(BD, "BoqGroqWorker") as groq_worker:
+            d._write()
+        groq_worker.assert_not_called()
+        self.assertEqual(_Capture.seen["kwargs"]["custom_stages"][0][:2],
+                         ("format", "DeepSeek"))
+
+
+class GeminiIsARealRegisteredBrowserAgentSeparateFromTheImageMaker(unittest.TestCase):
+    """"Gemini" is its own AGENT_REGISTRY entry (verified live, 2026-10-20),
+    deliberately separate from the existing "Google Gemini" entry -- that
+    one is permanently tagged as an image-generation tool
+    (core.agents._MAKES), and reusing it for a BOQ write-up would have
+    asked the writer stage to draw a picture of a bill of quantities
+    instead of writing one."""
+
+    def test_gemini_is_in_the_writer_pool(self):
+        from addons.boq import agents as boq_agents
+        self.assertIn("Gemini", boq_agents.WRITER)
+
+    def test_gemini_resolves_to_a_profile_with_every_selector_the_write_stage_needs(self):
+        import core_bridge as CB
+        entry = CB.agents.resolve_agent("", "Gemini")
+        self.assertIsNotNone(entry)
+        for key in ("url", "textarea_selector", "response_selector",
+                    "submit_selector"):
+            self.assertTrue(entry.get(key), f"missing {key}")
+        self.assertEqual(entry["url"], "https://gemini.google.com/app")
+
+    def test_gemini_is_not_tagged_as_an_image_maker_unlike_google_gemini(self):
+        import core_bridge as CB
+        self.assertFalse(CB.agents.is_maker(CB.agents.resolve_agent("", "Gemini")))
+        self.assertTrue(CB.agents.is_maker(
+            CB.agents.resolve_agent("", "Google Gemini")))
+
+    def test_gemini_goes_through_automationworker_like_any_other_browser_agent(self):
+        from unittest import mock
+        from addons.boq import dialog as BD
+
+        class _Capture:
+            seen = {}
+
+            def __init__(self, *a, **kw):
+                _Capture.seen = {"args": a, "kwargs": kw}
+                self.done = self.failed = self
+
+            def connect(self, *_):
+                pass
+
+            def start(self):
+                pass
+
+        d = _dialog()
+        d.summary = "WALLS 12.00 m"
+        d.request = "BOQ for the site"
+        d._task_name = "BOQ — sai"
+        d.writer_agent = "Gemini"
+        with mock.patch.object(BD, "AutomationWorker", _Capture), \
+                mock.patch.object(BD, "BoqGroqWorker") as groq_worker:
+            d._write()
+        groq_worker.assert_not_called()
+        self.assertEqual(_Capture.seen["kwargs"]["custom_stages"][0][:2],
+                         ("format", "Gemini"))
+
+
+class _TrackedWorker:
+    """A richer fake AutomationWorker than _Capture: records skip()/stop()
+    calls and lets a test fire .done/.failed on demand, for exercising the
+    fallback-chain logic in _start_followup_run without a real worker
+    thread or a real (blocking) BoqRunDialog."""
+
+    instances: list = []
+
+    def __init__(self, *a, **kw):
+        self.args, self.kwargs = a, kw
+        self.done = _FakeSignal()
+        self.failed = _FakeSignal()
+        self.started = False
+        self.skipped = False
+        self.stopped = False
+        self._running = False
+        _TrackedWorker.instances.append(self)
+
+    def start(self):
+        self.started = True
+        self._running = True
+
+    def isRunning(self):
+        return self._running
+
+    def skip(self):
+        self.skipped = True
+
+    def stop(self):
+        self.stopped = True
+        self._running = False
+
+
+class TheFollowUpFlowHasALiveWindowAndAFallbackChain(unittest.TestCase):
+    """Item 2 from BOQ-CHANGES-TODO.md: a verify/follow-up call shows a
+    live run window and automatically tries Claude then Kimi 2.6 if the
+    chosen agent can't answer -- the owner's own words, "when those errors
+    occur which agent should be used as a fallback (claude/kimi)"."""
+
+    def setUp(self):
+        from unittest import mock
+        _TrackedWorker.instances = []
+        self.d = _dialog()
+        self.d.summary = "WALLS 12.00 m"
+        self.d.request = "BOQ for the site"
+        self.d._task_name = "BOQ — sai"
+        self.d.result.setPlainText("1  Brick wall  12.00  m")
+        self._patches = [
+            mock.patch("addons.boq.dialog.AutomationWorker", _TrackedWorker),
+            mock.patch("addons.boq.run_dialog.BoqRunDialog", _FakeRunDialog),
+        ]
+        for p in self._patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self._patches])
+
+    def _start(self, agent="ChatGPT"):
+        self.d.writer_combo.setCurrentText(agent)
+        self.d._send_followup("add a gate", [], verify=False)
+
+    def test_the_chain_is_the_chosen_agent_then_claude_then_kimi(self):
+        self._start("ChatGPT")
+        self.assertEqual(self.d._fu_chain, ["Claude", "Kimi 2.6"])
+        self.assertEqual(_TrackedWorker.instances[0].kwargs["custom_stages"][0][:2],
+                         ("followup", "ChatGPT"))
+
+    def test_picking_claude_itself_does_not_put_it_in_its_own_fallback_chain(self):
+        self._start("Claude")
+        self.assertEqual(self.d._fu_chain, ["Kimi 2.6"])
+
+    def test_a_failure_automatically_tries_the_next_agent_in_the_chain(self):
+        self._start("ChatGPT")
+        first = _TrackedWorker.instances[0]
+        first.failed.emit("ChatGPT ran out of memory")
+        self.assertEqual(len(_TrackedWorker.instances), 2)
+        second = _TrackedWorker.instances[1]
+        self.assertEqual(second.kwargs["custom_stages"][0][:2],
+                         ("followup", "Claude"))
+        self.assertEqual(_FakeRunDialog.last.agent, "Claude")
+
+    def test_two_failures_try_claude_then_kimi_then_gives_up_cleanly(self):
+        self._start("ChatGPT")
+        _TrackedWorker.instances[0].failed.emit("ChatGPT ran out of memory")
+        _TrackedWorker.instances[1].failed.emit("Claude hit a sign-in wall")
+        self.assertEqual(len(_TrackedWorker.instances), 3)
+        self.assertEqual(_TrackedWorker.instances[2].kwargs["custom_stages"][0][:2],
+                         ("followup", "Kimi 2.6"))
+        # Kimi fails too -- the chain is now empty, so this must not try a
+        # fourth worker, must not crash, and must leave the dialog usable.
+        _TrackedWorker.instances[2].failed.emit("Kimi 2.6 timed out")
+        self.assertEqual(len(_TrackedWorker.instances), 3)
+        self.assertFalse(self.d.progress.isVisible())
+
+    def test_a_success_updates_the_result_and_reopens_the_followup_offer(self):
+        from unittest import mock
+        self._start("ChatGPT")
+        with mock.patch("dialogs.followup_dialog.FollowupDialog") as fake:
+            fake.return_value.submitted.return_value = False
+            _TrackedWorker.instances[0].done.emit(
+                {"followup": ["1  Brick wall  12.00  m, gate added"]}, {})
+        self.assertEqual(self.d.result.toPlainText(),
+                         "1  Brick wall  12.00  m, gate added")
+
+    def test_skip_calls_the_real_workers_skip_not_stop(self):
+        self._start("ChatGPT")
+        _FakeRunDialog.last.skip_requested.emit()
+        self.assertTrue(_TrackedWorker.instances[0].skipped)
+        self.assertFalse(_TrackedWorker.instances[0].stopped)
+        self.assertTrue(self.d._fu_skipped)
+
+    def test_stop_calls_the_real_workers_stop(self):
+        self._start("ChatGPT")
+        _FakeRunDialog.last.stop_requested.emit()
+        self.assertTrue(_TrackedWorker.instances[0].stopped)
+        self.assertTrue(self.d._fu_stopped)
+
+    def test_use_fallback_stops_the_current_attempt_and_starts_the_next_agent(self):
+        self._start("ChatGPT")
+        _FakeRunDialog.last.fallback_requested.emit()
+        self.assertTrue(_TrackedWorker.instances[0].stopped)
+        self.assertEqual(len(_TrackedWorker.instances), 2)
+        self.assertEqual(_TrackedWorker.instances[1].kwargs["custom_stages"][0][:2],
+                         ("followup", "Claude"))
+
+    def test_a_superseded_workers_late_signal_is_ignored(self):
+        """Manual fallback moved on to Claude; ChatGPT's worker is stopped
+        but Python still holds it, and Qt signal connections are not
+        magically severed -- a late .done from it must not overwrite
+        Claude's attempt."""
+        self._start("ChatGPT")
+        first = _TrackedWorker.instances[0]
+        _FakeRunDialog.last.fallback_requested.emit()
+        first.done.emit({"followup": ["stale answer from ChatGPT"]}, {})
+        self.assertNotEqual(self.d.result.toPlainText(),
+                            "stale answer from ChatGPT")
+
+
+class AFollowUpOrVerifyActuallyProducesAndSurfacesAFile(unittest.TestCase):
+    """Items 4-6 from BOQ-CHANGES-TODO.md, 2026-10-21: a follow-up's new
+    file never replaced the stale measured CSV the follow-up window kept
+    showing, "Verify and remake" could come back with no file in any
+    format and no way to ask for one, and its live window read as stuck
+    well before a real drawing-scan run (the owner's own report: ~20
+    minutes) could plausibly finish."""
+
+    def setUp(self):
+        from unittest import mock
+        _TrackedWorker.instances = []
+        self.d = _dialog()
+        self.d.summary = "WALLS 12.00 m"
+        self.d.request = "BOQ for the site"
+        self.d._task_name = "BOQ — sai"
+        self.d.cad_path = os.path.join(tempfile.mkdtemp(), "sai.dxf")
+        with open(self.d.cad_path, "w") as fh:
+            fh.write("0\nEOF\n")
+        self.d.result.setPlainText("1  Brick wall  12.00  m")
+        self._patches = [
+            mock.patch("addons.boq.dialog.AutomationWorker", _TrackedWorker),
+            mock.patch("addons.boq.run_dialog.BoqRunDialog", _FakeRunDialog),
+        ]
+        for p in self._patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self._patches])
+
+    def _followup(self, agent="ChatGPT"):
+        self.d.writer_combo.setCurrentText(agent)
+        self.d._send_followup("add a gate", [], verify=False)
+
+    def _recheck(self, agent="ChatGPT"):
+        from unittest import mock
+        self.d.writer_combo.setCurrentText(agent)
+        with mock.patch.object(self.d, "_drawing_consent", return_value=True):
+            self.d._ask_recheck()
+
+    # ── item 5: the format picker ────────────────────────────────────
+    def test_the_default_format_adds_nothing_to_the_prompt(self):
+        self._followup()
+        prompt = _TrackedWorker.instances[0].kwargs["custom_stages"][0][2][0]
+        self.assertNotIn("downloadable", prompt)
+
+    def test_choosing_a_format_adds_a_file_request_to_the_prompt(self):
+        self.d.format_combo.setCurrentIndex(self.d.format_combo.findData("docx"))
+        self._followup()
+        prompt = _TrackedWorker.instances[0].kwargs["custom_stages"][0][2][0]
+        self.assertIn("Word (.docx)", prompt)
+
+    def test_a_format_request_is_never_sent_to_groq(self):
+        from unittest import mock
+        self.d.format_combo.setCurrentIndex(self.d.format_combo.findData("docx"))
+        self.d.writer_combo.setCurrentText("Groq")
+        with mock.patch("addons.boq.dialog.BoqGroqWorker", _TrackedWorker):
+            self.d._send_followup("add a gate", [], verify=False)
+        prompt = _TrackedWorker.instances[0].args[1]
+        self.assertNotIn("downloadable", prompt)
+
+    # ── items 4/5: the engine sees the real request, not a short label ─
+    def test_the_engine_is_given_the_real_prompt_as_its_query(self):
+        self._followup()
+        query = _TrackedWorker.instances[0].args[3]
+        self.assertIn("add a gate", query)
+        self.assertIn("MEASURED FIGURES", query)
+
+    # ── item 6: the wait ceiling and an honest duration note ──────────
+    def test_recheck_gets_a_twenty_minute_wait_floor(self):
+        self._recheck()
+        kw = _TrackedWorker.instances[0].kwargs
+        self.assertTrue(kw["followup"])
+        self.assertEqual(kw["min_wait"], 1200)
+
+    def test_a_plain_followup_gets_followup_true_with_no_extra_floor(self):
+        self._followup()
+        kw = _TrackedWorker.instances[0].kwargs
+        self.assertTrue(kw["followup"])
+        self.assertEqual(kw["min_wait"], 0)
+
+    def test_the_live_window_shows_an_honest_duration_for_recheck(self):
+        self._recheck()
+        self.assertIn("20 minutes", _FakeRunDialog.last.note)
+
+    def test_a_plain_followup_gets_no_special_duration_note(self):
+        self._followup()
+        self.assertEqual(_FakeRunDialog.last.note, "")
+
+    # ── items 4/5: a produced file can actually be learned and shown ──
+    def test_files_out_is_passed_so_a_harvested_file_can_be_learned(self):
+        self._followup()
+        self.assertIsInstance(_TrackedWorker.instances[0].kwargs["files_out"], list)
+
+    def test_a_harvested_file_becomes_the_shown_deliverable_not_the_stale_csv(self):
+        from unittest import mock
+        self.d.csv_path = "/x/boq_quantities_1.csv"
+        self._followup()
+        made = _TrackedWorker.instances[0].kwargs["files_out"]
+        tmp = tempfile.NamedTemporaryFile(suffix=".docx", delete=False)
+        tmp.write(b"x")
+        tmp.close()
+        made.append({"path": tmp.name, "name": "BOQ.docx"})
+        with mock.patch("core_bridge.config.save_artifact",
+                        return_value="/artifacts/BOQ.docx") as save, \
+                mock.patch("dialogs.followup_dialog.FollowupDialog") as fake:
+            fake.return_value.submitted.return_value = False
+            _TrackedWorker.instances[0].done.emit(
+                {"followup": ["1  Brick wall  12.00  m, gate added"]}, {})
+            save.assert_called_once()
+        self.assertEqual(self.d._deliverable_path, "/artifacts/BOQ.docx")
+        artifacts = fake.call_args.kwargs["artifacts"]
+        self.assertEqual(artifacts,
+                         ["/artifacts/BOQ.docx", "/x/boq_quantities_1.csv"])
+
+    def test_no_harvested_file_leaves_the_stale_csv_as_the_only_artifact(self):
+        """The common, correct case -- a plain text answer -- must not be
+        treated as a bug: nothing was made, so nothing new is shown."""
+        from unittest import mock
+        self.d.csv_path = "/x/boq_quantities_1.csv"
+        self._followup()
+        with mock.patch("dialogs.followup_dialog.FollowupDialog") as fake:
+            fake.return_value.submitted.return_value = False
+            _TrackedWorker.instances[0].done.emit(
+                {"followup": ["1  Brick wall  12.00  m, gate added"]}, {})
+        self.assertEqual(self.d._deliverable_path, "")
+        self.assertEqual(fake.call_args.kwargs["artifacts"],
+                         ["/x/boq_quantities_1.csv"])
 
 
 class ASampleBoqDefinesTheDeliverable(unittest.TestCase):

@@ -126,7 +126,8 @@ class AutomationWorker(_Worker):
                  image_stages=None, failover: bool = True,
                  motion_skeleton: str = "",
                  stage_skills: dict | None = None,
-                 prior_responses: dict | None = None):
+                 prior_responses: dict | None = None,
+                 min_wait: int = 0):
         super().__init__()
         self.routing, self.cfg = routing, cfg
         self.attachments, self.query = attachments, query
@@ -150,6 +151,15 @@ class AutomationWorker(_Worker):
         # wait ceiling (automation.FOLLOWUP_MIN_WAIT); the everyday budget
         # was cutting those answers off mid-way.
         self.followup = bool(followup)
+        # A raw wait-ceiling floor for a caller who knows this particular
+        # stage is heavier than a normal follow-up (BOQ's "recheck" — the
+        # tool has to actually read the drawing, which the owner reports can
+        # take ~20 minutes, far past automation.FOLLOWUP_MIN_WAIT's 8).
+        # Independent of `followup` so it can raise the ceiling further
+        # without claiming the folder-continuation behaviour that flag also
+        # triggers. 0 = no floor of its own; automation.run()'s default (or
+        # followup's) stands.
+        self.min_wait = int(min_wait or 0)
         # A caller-owned list the engine appends every harvested file record
         # to (its pipeline_files_out) — how the STEP dialog gets the drawing
         # sheet an image tool returned, the same way the terminal's
@@ -227,6 +237,8 @@ class AutomationWorker(_Worker):
             if self.followup:
                 kwargs["followup"] = True
                 kwargs["min_wait"] = automation.FOLLOWUP_MIN_WAIT
+            if self.min_wait:
+                kwargs["min_wait"] = max(kwargs.get("min_wait", 0), self.min_wait)
             if self.files_out is not None:
                 kwargs["pipeline_files_out"] = self.files_out
             if self.image_stages:

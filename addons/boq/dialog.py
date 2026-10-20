@@ -30,8 +30,10 @@ from workers import AutomationWorker, MeasureWorker, RecordWorker
 from widgets import controls as C
 from widgets.loader import Loader
 from widgets.ask_panel import AskPanel, MoreOptions
+from addons.boq import agents as boq_agents
 from addons.boq.measured import MeasuredTable
 from addons.boq.pricing import PricingTable
+from addons.boq.workers import BoqGroqWorker
 from widgets.output_panel import short_duration
 
 
@@ -114,6 +116,15 @@ class BoqDialog(PrismDialog):
         self._standards = ""
         self._brief = ""        # the interpreter's legend & scope brief
         self._links: dict = {}
+        # The latest real file an AI stage actually produced (write-up,
+        # verify-and-remake or a follow-up) — as opposed to self.csv_path,
+        # which is the LOCALLY measured quantities, made before any AI runs
+        # at all and never touched again. Shown ahead of csv_path in the
+        # follow-up window once there is one, so that window stops showing
+        # a stale measurement file after an answer that made something new.
+        self._deliverable_path = ""
+        self._write_made_files: list = []
+        self._fu_made_files: list = []
         # Accumulated across the stage chain so the main window can offer its
         # post-completion follow-up once this dialog closes: every stage's
         # output, and which agent produced it. The dialog runs its own worker
@@ -220,15 +231,14 @@ class BoqDialog(PrismDialog):
         # document without editing the global Agents setup. The interpreter
         # (screenshot reader) stays automatic — it only runs when an image is
         # attached, and ChatGPT is the right tool for it.
+        #
+        # The POOL each picker offers is BOQ's own (addons/boq/agents.py), not
+        # the engine's shared CATEGORIES — see that file for why. cfg_agents
+        # below is still the shared, global "what's configured in Settings",
+        # used only to decide which pool entry starts selected.
         cfg_agents = CB.config.active_agents(self.cfg)
-        try:
-            cats = CB.agents.CATEGORIES
-        except Exception:                               # noqa: BLE001
-            cats = {}
-        writer_opts = list(dict.fromkeys(
-            list(cats.get("brains", {}).get("agents", []))
-            + list(cats.get("content", {}).get("agents", [])))) or ["Claude", "ChatGPT"]
-        research_opts = list(cats.get("research", {}).get("agents", [])) or ["Perplexity"]
+        writer_opts = list(boq_agents.WRITER) or ["Claude", "ChatGPT"]
+        research_opts = list(boq_agents.RESEARCH) or ["Perplexity"]
         self.writer_combo = QComboBox()
         self.writer_combo.addItems(writer_opts)
         self.research_combo = QComboBox()
@@ -247,6 +257,24 @@ class BoqDialog(PrismDialog):
         prow.addWidget(self.writer_combo)
         prow.addWidget(rlab)
         prow.addWidget(self.research_combo)
+        # What file the write-up, "Verify and remake" and a follow-up should
+        # hand back — the owner's own ask: "a dedicated button just to
+        # select in which file format does the user want the file", after
+        # "Verify and remake" came back with nothing to open at all. "Let
+        # the tool decide" (empty) changes nothing about today's behaviour;
+        # picking a format adds one line to the prompt AND promotes the
+        # stage to a `file` step in the engine's own contract (see
+        # core/contract.py), which re-asks once and, worst case, writes the
+        # document out of the tool's own words itself — so a format, once
+        # chosen, is a promise, not just a request.
+        flab = QLabel(i18n.t("· File format")); flab.setObjectName("meta")
+        self.format_combo = QComboBox()
+        self.format_combo.addItem(i18n.t("Let the tool decide"), "")
+        self.format_combo.addItem(i18n.t("Word document (.docx)"), "docx")
+        self.format_combo.addItem(i18n.t("CSV"), "csv")
+        self.format_combo.addItem(i18n.t("PDF"), "pdf")
+        prow.addWidget(flab)
+        prow.addWidget(self.format_combo)
         prow.addStretch(1)
         root.addWidget(picker)
 
@@ -457,6 +485,19 @@ class BoqDialog(PrismDialog):
             QMessageBox.warning(self, "BOQ",
                                 "Pick an AI to write the BOQ (the 'Write with' box).")
             return
+        if self.writer_agent == "Groq":
+            if not self.cfg.get("api_key"):
+                QMessageBox.warning(self, "BOQ",
+                                    "Groq needs your key — add it in Settings, "
+                                    "or pick a different tool in 'Write with'.")
+                return
+            if self.templates or self.notes:
+                QMessageBox.warning(self, "BOQ",
+                                    "Groq (in-house) is a text-only call — it "
+                                    "can't read an attached template or notes "
+                                    "file. Pick a different tool in 'Write "
+                                    "with', or remove the attachment first.")
+                return
         self.researcher = self.research_combo.currentText().strip()
         # ChatGPT specifically, and only when there is something it can read.
         # It is the stage that turns a screenshot of the sheet plus a sample
@@ -559,7 +600,75 @@ class BoqDialog(PrismDialog):
         self._lap("interpret")
         self._write()
 
+    # ── the file-format picker ──────────────────────────────────────────
+    _FORMAT_PHRASE = {
+        "docx": "a downloadable Word (.docx) file",
+        "csv": "a downloadable CSV file",
+        "pdf": "a downloadable PDF file",
+    }
+
+    def _wanted_format(self) -> str:
+        """"" (let the tool decide), or "docx"/"csv"/"pdf" from the picker."""
+        return self.format_combo.currentData() or ""
+
+    def _format_request_line(self) -> str:
+        """One line asking for the chosen format, appended to a prompt — or
+        "" when the picker is left on "Let the tool decide", which changes
+        nothing about today's prompt. Not used for Groq (in-house): a plain
+        API call with no browser page, so there is never a file to produce
+        or download."""
+        fmt = self._wanted_format()
+        if not fmt:
+            return ""
+        return ("\n\nGive me the result as " + self._FORMAT_PHRASE[fmt]
+                + ", built here rather than only pasted into the chat.")
+
+    def _save_deliverable(self, made_files: list, stage: str):
+        """A real file the engine harvested off the page for `stage` (or
+        wrote itself from the tool's own text, when the tool wouldn't) —
+        copy it into this run's own Artifacts folder and remember it as the
+        thing to show next, the same way addons/step/dialog.py's
+        _on_drafted copies its own harvested sheet. `made_files` is a
+        AutomationWorker(files_out=...) list: [{"path": ..., "name": ...,
+        "kind": ...}, ...], newest-ish last; empty when nothing was ever
+        made for this stage (the common case for "format" and "followup",
+        a correct plain text answer, not a bug)."""
+        task = getattr(self, "_task_name", "") or self._doc
+        for rec in reversed(made_files):
+            src = rec.get("path", "") if isinstance(rec, dict) else str(rec)
+            if not src or not os.path.exists(src):
+                continue
+            try:
+                saved = CB.config.save_artifact(
+                    src, task, kind=stage, task=task,
+                    name=rec.get("name") or rec.get("_site_name") or "")
+            except Exception:                                   # noqa: BLE001
+                continue
+            self._deliverable_path = saved
+            return
+
     def _write(self):
+        # Reset up front, not only on the AutomationWorker branch below — a
+        # Groq run (which never touches this list at all) must not leave
+        # _on_written looking at a PREVIOUS run's harvested files and saving
+        # a stale one as if this run had just made it.
+        self._write_made_files = []
+        # Known only now, not at submit time: pricing can be filled in after
+        # the first measurement, so whether there is a priced CSV to hand
+        # the writer is only certain once we're actually about to write.
+        # Groq (in-house) is a plain API call with no file upload, so if
+        # pricing was done this run it cannot see it — caught here, not
+        # silently dropped, or its answer would be missing the one thing
+        # the owner just priced.
+        reference = self._reference_csv()
+        if self.writer_agent == "Groq" and reference:
+            self._set_busy(False, "")
+            QMessageBox.warning(self, "BOQ",
+                                "Groq (in-house) is a text-only call — it "
+                                "can't read the priced reference CSV. Pick a "
+                                "different tool in 'Write with' to write up "
+                                "this priced run.")
+            return
         self.progress.set_stage(2)
         self._set_busy(True, f"{self.writer_agent} is writing your BOQ…")
         prompt = self._pm.formatting_prompt(
@@ -581,13 +690,27 @@ class BoqDialog(PrismDialog):
         # the drawing; until 2026-09-10 the CAD file rode along here "so the
         # tool could check", which put the customer's drawing on a third
         # party's server for a formatting job that never needed it.
-        reference = self._reference_csv()
         if reference:
             prompt += (
                 "\n\nREFERENCE ONLY: the attached CSV is the offline measured and "
                 "priced take-off. Use it to lay out and check your figures. It is "
                 "not the firm's record: do not recompute totals or change any "
                 "quantity. Lines with a blank rate are unpriced.")
+
+        if self.writer_agent == "Groq":
+            # Direct API call, not a browser agent -- see
+            # addons/boq/workers.py. Reached here only once the guards above
+            # confirm there is nothing on disk for it to miss: no template,
+            # no notes (checked at submit) and no priced reference (just
+            # above), so the plain prompt text is the whole of what it needs.
+            self._worker = BoqGroqWorker(self.cfg, prompt)
+            self._worker.done.connect(self._on_written)
+            self._worker.failed.connect(self._on_failed)
+            self._worker.start()
+            return
+
+        prompt += self._format_request_line()
+
         files = list(self.templates) + list(self.notes) + reference
         task_label = getattr(self, "_task_name", "") or f"{self._doc} — {self.request}"
 
@@ -600,6 +723,11 @@ class BoqDialog(PrismDialog):
             # interpret stages return checklists and notes, not the table.
             stage_skills={"format": [s.key for s in CB.skills.for_feature(
                 f"{self.mode}.format")]},
+            # "format" is already a `file`-kind step by default (see
+            # core/contract.py's _BY_STAGE) — this just lets the dialog
+            # actually SEE what the engine harvested or wrote out for it,
+            # which nothing captured before (see _save_deliverable).
+            files_out=self._write_made_files,
             chatgpt_analysis=False)
         self._worker.done.connect(self._on_written)
         self._worker.failed.connect(self._on_failed)
@@ -639,6 +767,7 @@ class BoqDialog(PrismDialog):
             self.status.setText(
                 (f"Done in {timing}. " if timing else "Done. ")
                 + "Check the numbers against the saved file above.")
+        self._save_deliverable(self._write_made_files, "format")
         self.open_btn.setEnabled(bool(self._links.get("format")))
         self.recheck_btn.setEnabled(bool(self.cad_path) and bool(texts))
         task_label = getattr(self, "_task_name", "") or f"{self._noun} — {self.request}"
@@ -677,6 +806,16 @@ class BoqDialog(PrismDialog):
         return answer == QMessageBox.Yes
 
     def _ask_recheck(self):
+        # Groq (in-house) cannot do this at all, consent screen or not --
+        # "recheck" always means sending the drawing file itself, and Groq
+        # has no file upload. Caught before the consent dialog even opens,
+        # so a Groq user isn't asked to approve a send that would then fail.
+        if self.writer_combo.currentText().strip() == "Groq":
+            QMessageBox.warning(self, "BOQ",
+                                "Groq (in-house) can't verify against the "
+                                "drawing — it never sees the file. Pick a "
+                                "different tool in 'Write with' to recheck.")
+            return
         if not self._drawing_consent():
             return
         self._send_followup(VERIFY_PROMPT, [CB.files.attach(self.cad_path)], verify=True)
@@ -684,21 +823,165 @@ class BoqDialog(PrismDialog):
     def _send_followup(self, note: str, extra_files: list, verify: bool):
         agent = self.writer_combo.currentText().strip() or "the writing AI"
         stage = "recheck" if verify else "followup"
-        self._followup_agent = agent
-        self._followup_stage = stage
-        self.progress.set_stage(2)
-        self._set_busy(True, f"{agent} is working on your {self._noun}…")
+        # The authoritative check, not just the earlier ones at the two call
+        # sites that can reach here (_ask_recheck, the "verify" quick action
+        # in _offer_followup) — this also catches a PLAIN follow-up where
+        # the person attached their own file in the follow-up box, the one
+        # case neither of those checks for.
+        if agent == "Groq" and (extra_files or self.templates or self.notes):
+            self._set_busy(False, "")
+            QMessageBox.warning(self, "BOQ",
+                                "Groq (in-house) is text-only — it can't "
+                                "read the drawing or an attached file. Pick "
+                                "a different tool in 'Write with' for this.")
+            return
         prompt = (f"{note}\n\nMEASURED FIGURES:\n{self.summary}\n\n"
                   f"PREVIOUS ANSWER:\n{self.result.toPlainText()}")
         files = list(extra_files) + list(self.templates) + list(self.notes)
+        if agent != "Groq":
+            # No browser page for Groq, so no file to produce or download —
+            # the format line would just confuse a plain API reply.
+            prompt += self._format_request_line()
+        if agent == "Groq":
+            # Text-only, like the initial write — reached only once the
+            # guard above has confirmed there is no file this prompt text
+            # doesn't already cover. No fallback chain or live window: a
+            # direct API call either answers or it doesn't, there is no
+            # tab to hand to another tool.
+            self._followup_agent = agent
+            self._followup_stage = stage
+            self.progress.set_stage(2)
+            self._set_busy(True, f"{agent} is working on your {self._noun}…")
+            self._worker = BoqGroqWorker(self.cfg, prompt, stage=stage)
+            self._worker.done.connect(self._on_followed_up)
+            self._worker.failed.connect(self._on_failed)
+            self._worker.start()
+            return
+        self._start_followup_run(stage, agent, prompt, files)
+
+    # ── the live run window: one StageCard, a fallback chain, Skip/Use
+    # fallback/Stop wired to the real AutomationWorker — see
+    # addons/boq/run_dialog.py's module docstring for exactly what each
+    # control does and does not do, and why. _fu_* holds this one run's
+    # state; a new _send_followup call always starts a fresh one.
+    def _start_followup_run(self, stage: str, agent: str, prompt: str,
+                            files: list):
+        from addons.boq.run_dialog import BoqRunDialog
+        self._fu_stage = stage
+        self._fu_prompt = prompt
+        self._fu_files = files
+        self._fu_chain = [agent] + [a for a in boq_agents.FALLBACK_ORDER
+                                    if a != agent]
+        self._fu_stopped = False
+        self._fu_skipped = False
+        self._fu_token = 0
+        titles = {"recheck": i18n.t("Verifying against the drawing"),
+                 "followup": i18n.t("Carrying your follow-up on")}
+        # Verify-and-remake reads the drawing itself, not just a chat reply
+        # — the owner's own report is ~20 minutes for that, far past what a
+        # plain follow-up takes, and the window used to give no hint of
+        # that, reading as stuck rather than working.
+        notes = {"recheck": i18n.t(
+            "{agent} is reading the drawing itself, not just answering from "
+            "memory — this can take up to 20 minutes.").replace("{agent}", agent)}
+        self._fu_dialog = BoqRunDialog(titles[stage], stage, agent, parent=self,
+                                       note=notes.get(stage, ""))
+        self._fu_dialog.skip_requested.connect(self._fu_on_skip)
+        self._fu_dialog.fallback_requested.connect(self._fu_on_fallback)
+        self._fu_dialog.stop_requested.connect(self._fu_on_stop)
+        self._fu_start_next()
+        self._fu_dialog.exec()
+
+    def _fu_start_next(self):
+        if not self._fu_chain:
+            self._fu_dialog.finish_error(i18n.t(
+                "None of the fallback tools could answer either. The "
+                "previous answer is still shown."))
+            self._set_busy(False, "")
+            self.status.setText(i18n.t(
+                "Nothing came back. The previous answer is still shown."))
+            return
+        tool = self._fu_chain.pop(0)
+        self._fu_token += 1
+        token = self._fu_token
+        self._followup_agent = tool
+        self._followup_stage = self._fu_stage
+        self.progress.set_stage(2)
+        self._set_busy(True, f"{tool} is working on your {self._noun}…")
+        self._fu_dialog.set_agent(tool)
+        self._fu_made_files: list = []
         self._worker = AutomationWorker(
-            {}, self.cfg, files,
-            f"{stage} — {getattr(self, '_task_name', '') or self._doc}",
-            custom_stages=[(stage, agent, [prompt])],
-            chatgpt_analysis=False)
-        self._worker.done.connect(self._on_followed_up)
-        self._worker.failed.connect(self._on_failed)
+            {}, self.cfg, self._fu_files,
+            # The actual prompt, not a short task label — this is what the
+            # engine's wants_file()/_requested_formats() scan to decide
+            # whether this stage owes a FILE (core/contract.py), which is
+            # the only way a chosen format or "make it a docx" in the
+            # person's own words ever reaches that check. A plain task
+            # label never mentioned either.
+            self._fu_prompt,
+            custom_stages=[(self._fu_stage, tool, [self._fu_prompt])],
+            chatgpt_analysis=False,
+            # Same wait ceiling and same-folder artifacts as any other
+            # follow-up (automation.FOLLOWUP_MIN_WAIT); "recheck" alone
+            # gets a much higher floor on top — see min_wait below.
+            followup=True,
+            min_wait=1200 if self._fu_stage == "recheck" else 0,
+            # So _fu_on_done can learn what, if anything, got produced —
+            # nothing surfaced this before (see _save_deliverable).
+            files_out=self._fu_made_files)
+        self._worker.done.connect(
+            lambda responses, links, t=token: self._fu_on_done(t, responses, links))
+        self._worker.failed.connect(
+            lambda error, t=token: self._fu_on_failed(t, error))
         self._worker.start()
+
+    def _fu_on_done(self, token: int, responses: dict, links: dict):
+        if token != self._fu_token:
+            return      # a superseded attempt's late signal
+        stage = self._fu_stage
+        texts = responses.get(stage) or []
+        self._save_deliverable(self._fu_made_files, stage)
+        if self._fu_skipped:
+            self._fu_dialog.finish_skipped()
+        elif self._fu_stopped:
+            self._fu_dialog.finish_cancelled()
+        else:
+            self._fu_dialog.finish_ok(texts, links.get(stage, ""))
+        self._on_followed_up(responses, links)
+
+    def _fu_on_failed(self, token: int, error: str):
+        if token != self._fu_token or self._fu_stopped or self._fu_skipped:
+            return
+        if self._fu_chain:
+            self._fu_dialog.finish_error(
+                (i18n.t("{tool} could not answer ({error}) — trying the "
+                       "next fallback tool…")
+                 .replace("{tool}", self._followup_agent)
+                 .replace("{error}", error)),
+                exhausted=False)
+            self._fu_start_next()
+        else:
+            self._fu_dialog.finish_error(error)
+            self._set_busy(False, "")
+            self.status.setText(i18n.t(
+                "Nothing came back. The previous answer is still shown."))
+
+    def _fu_on_skip(self):
+        self._fu_skipped = True
+        if self._worker and self._worker.isRunning():
+            self._worker.skip()
+
+    def _fu_on_fallback(self):
+        if self._worker and self._worker.isRunning():
+            self._worker.stop()
+        self._fu_start_next()
+
+    def _fu_on_stop(self):
+        self._fu_stopped = True
+        if self._worker and self._worker.isRunning():
+            self._worker.stop()
+        self.status.setText(i18n.t(
+            "Stopping — finishing up, keeping what's done…"))
 
     def _on_followed_up(self, responses: dict, links: dict):
         stage = self._followup_stage
@@ -726,13 +1009,29 @@ class BoqDialog(PrismDialog):
         actions = []
         if self.cad_path:
             actions.append(("verify", i18n.t("Verify and remake"), VERIFY_PROMPT))
-        dlg = FollowupDialog(answer, self,
-                             artifacts=[p for p in [self.csv_path] if p],
-                             quick_actions=actions)
+        # self._deliverable_path (the latest file an AI stage actually made —
+        # write-up, verify-and-remake or a follow-up) goes FIRST: it is what
+        # the person just asked for and, until now, this window kept showing
+        # self.csv_path instead — the locally measured quantities, made
+        # before any AI ran and never touched again, regardless of what a
+        # follow-up had just produced. Both are kept (not one replacing the
+        # other) since the measured CSV is still a real, checkable artifact
+        # of this run.
+        dlg = FollowupDialog(
+            answer, self,
+            artifacts=[p for p in [self._deliverable_path, self.csv_path] if p],
+            quick_actions=actions)
         dlg.exec()
         if not dlg.submitted():
             return
         if dlg.chosen_quick() == "verify":
+            if self.writer_combo.currentText().strip() == "Groq":
+                QMessageBox.warning(self, "BOQ",
+                                    "Groq (in-house) can't verify against "
+                                    "the drawing — it never sees the file. "
+                                    "Pick a different tool in 'Write with' "
+                                    "to recheck.")
+                return
             if not self._drawing_consent():
                 return
             self._send_followup(dlg.followup_text(),

@@ -64,6 +64,13 @@ STAGE_COPY = {
     "presentation": ("present", "Build the slides", "A clean deck, ready to present"),
     "summary":      ("list",    "Pull it together", "Fold every step into one answer"),
     "analysis":     ("file",    "Read your files",  "Go through the attachments first"),
+    # BOQ's own stage keys (addons/boq/dialog.py, addons/boq/run_dialog.py) --
+    # not PIPELINE_ORDER categories, but STAGE_COPY is keyed by any stage a
+    # StageCard is asked to show, and "analysis" above is already a
+    # non-pipeline custom key, so three more read fine here.
+    "format":       ("pencil",  "Write it up",       "Turn the measured figures into the document"),
+    "recheck":      ("eye",     "Verify and remake", "Check the answer against the drawing itself"),
+    "followup":     ("chat",    "Make the change",   "Carry the conversation on from the last answer"),
 }
 
 # How a step got here. Four provenances, four looks — see the module docstring.
