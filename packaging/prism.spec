@@ -208,6 +208,18 @@ try:
 except Exception:                                       # not installed: source-only
     pass
 
+# OpenCV, which RapidOCR imports. cv2's __init__ loads its compiled extension
+# by a path it reads from its own config files, and on the macOS arm64 bundle
+# that left "recursion is detected during loading of cv2 binary extensions" —
+# the whole of RapidOCR unusable, while Windows and Linux were fine. Taking
+# everything cv2 ships (extension, config, submodules, dylibs) leaves it
+# nothing to go looking for.
+from PyInstaller.utils.hooks import collect_all as _collect_all
+_cv_datas, _cv_binaries, _cv_hidden = _collect_all("cv2")
+datas += _cv_datas
+_extra_binaries = list(_cv_binaries)
+hiddenimports_cv2 = list(_cv_hidden)
+
 # The FFmpeg executable, which lives inside the imageio_ffmpeg package as a
 # data file rather than as Python. include_py_files is off, so this picks up
 # the binary and nothing else.
@@ -423,6 +435,7 @@ except ImportError:
           "no browser engine — Prism Studio will fall back to Prism Reel on "
           "every machine that runs it.")
 
+hiddenimports += hiddenimports_cv2
 hiddenimports += collect_submodules("undetected_chromedriver")
 hiddenimports += collect_submodules("selenium")
 
@@ -482,7 +495,7 @@ a = Analysis(
     # below resolve — and analysing them is what drags in the stdlib they use
     # (smtplib, ssl, csv, email, …), none of which the GUI itself imports.
     pathex=[GUI_DIR, ENGINE_DIR],
-    binaries=[],
+    binaries=_extra_binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
