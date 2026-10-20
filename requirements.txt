@@ -165,3 +165,11 @@ rapidocr-onnxruntime
 # Linux were fine. Held below the 4.12 wheels, together with collect_all("cv2")
 # in packaging/prism.spec.
 opencv-python>=4.5,<4.12
+
+# macOS reads pictures with Apple's own Vision framework (core/ocr.py's
+# second backend). RapidOCR is first in line but its OpenCV does not load in
+# the macOS arm64 bundle (see above), so on a Mac Vision is what actually
+# runs — and it needs these bridges bundled, because core.ocr imports them
+# lazily where PyInstaller cannot see.
+pyobjc-framework-Vision; sys_platform == "darwin"
+pyobjc-framework-Quartz; sys_platform == "darwin"

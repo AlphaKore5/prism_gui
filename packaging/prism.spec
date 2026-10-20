@@ -357,6 +357,9 @@ _REQUIRED = {
     "selenium": "browser automation", "undetected_chromedriver": "browser automation",
     "googleapiclient": "Google Drive", "google_auth_oauthlib": "Google Drive",
 }
+if sys.platform == "darwin":
+    _REQUIRED.update({"Vision": "reading text in pictures on a Mac",
+                      "Quartz": "reading text in pictures on a Mac"})
 _missing = [f"{m} ({why})" for m, why in _REQUIRED.items() if _ilu.find_spec(m) is None]
 if _missing:
     raise SystemExit("Refusing to build: these packages are not installed on "
@@ -436,6 +439,9 @@ except ImportError:
           "every machine that runs it.")
 
 hiddenimports += hiddenimports_cv2
+if sys.platform == "darwin":
+    # core.ocr imports these inside a function, so the analyser never sees them.
+    hiddenimports += ["Vision", "Quartz", "Foundation", "objc", "CoreFoundation"]
 hiddenimports += collect_submodules("undetected_chromedriver")
 hiddenimports += collect_submodules("selenium")
 
