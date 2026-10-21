@@ -10,6 +10,30 @@ Tests: **1966 passing** (6 skipped, 8 Sep 2026 after Round 16 landed on main —
 
 ---
 
+# 1.6.10 — BOQ: its own agent lists, a live follow-up window, real output files (21 Oct 2026)
+
+- **BOQ's writer/research agent pickers no longer share the engine's CATEGORIES
+  list.** They live in `addons/boq/agents.py` now, so editing which tools BOQ
+  offers can never change what Leads, Content or Visual offer. Writer gains
+  Groq (in-house, a direct API call with no browser tab), Grok, DeepSeek and a
+  text-only Gemini (separate from the existing image-making "Google Gemini"
+  entry); Research gains Claude and ChatGPT.
+- **"Verify and remake" and a follow-up now show a live progress window** —
+  the same Run-screen language the rest of Prism already uses — with Skip,
+  Use fallback and Stop, and a Claude → Kimi 2.6 fallback chain that tries
+  automatically if the chosen tool errors out (ChatGPT's memory limit, most
+  often).
+- **A follow-up's new file no longer gets lost.** Nothing previously tracked
+  what an AI stage actually produced; the "anything to change?" window always
+  showed the original measured-quantities CSV no matter what a follow-up had
+  just made. It now shows the newest real file first.
+- **"Verify and remake" can actually produce a file**, in a format you choose
+  (a new "File format" picker: Word / CSV / PDF, or let the tool decide) —
+  it used to come back with nothing to open, in any format, ever.
+- **Its progress window says up front that a drawing-scan run can take up to
+  20 minutes**, instead of reading like it had stalled; the run itself now
+  gets that much time rather than being cut short.
+
 # 1.6.7 — Email inquiries: newest first, no zero acknowledgements, quieter mail check (15 Oct 2026)
 
 - **The Inquiry column shows the newest mail first.** With 15 inquiries the one that had
