@@ -501,15 +501,22 @@ def scenario_failures():
     v = with_groq(boom, lambda: triage.classify([mail(sender="new@x.com")], api_key="k"))
     check(S, "groq down → unsorted, not wrong", v[0].category == triage.UNSORTED, "")
 
-    # register locked mid-run
+    # register locked mid-run -- mailflow.check()'s dirty-row path calls
+    # register.save_changes(rows, path, before), not register.save(); this
+    # patched the wrong name (register.save is a real, separate function,
+    # just not the one this call site uses) so the lock was never actually
+    # hit and both checks below passed on an untested path. mailflow.py's
+    # own RegisterLocked handler already resets out.state to the pre-fetch
+    # state specifically so an unsaved row carries no bookmark advance --
+    # this fix only makes the test exercise that.
     known = triage.Knowledge(customers={"shaktiauto.in"})
-    real_save = register.save
-    register.save = lambda rows, path: (_ for _ in ()).throw(
+    real_save_changes = register.save_changes
+    register.save_changes = lambda rows, path, before: (_ for _ in ()).throw(
         register.RegisterLocked("Close inquiries.csv in Excel and try again"))
     try:
         r = run_check(cfg, paths, [mail()], knowledge=known, local_only=True)
     finally:
-        register.save = real_save
+        register.save_changes = real_save_changes
     check(S, "locked register → says close Excel", "Excel" in r.error, r.error)
     check(S, "locked register does NOT advance the bookmark",
           r.state.last_uid == 0, str(r.state.last_uid))
