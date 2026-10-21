@@ -72,7 +72,16 @@ class EachPlatformUsesItsOwnOpener(unittest.TestCase):
         popen.assert_not_called()
 
     def test_if_the_opener_fails_qt_is_the_last_resort(self):
+        # Only subprocess.Popen was mocked here before -- on macOS/Linux CI
+        # that IS the real opener, so the failure and the Qt fallback both
+        # fired. On Windows the real opener is os.startfile, never touched
+        # by this mock, so it quietly succeeded for real against the temp
+        # PNG and the Qt fallback was never reached (0 calls) -- failing
+        # only on the one platform this test didn't force a failure on.
+        # os.startfile only exists on Windows, hence create=True.
         with mock.patch("subprocess.Popen", side_effect=OSError), \
+                mock.patch.object(paths.os, "startfile", side_effect=OSError,
+                                  create=True), \
                 mock.patch("PySide6.QtGui.QDesktopServices.openUrl",
                            return_value=True) as qt:
             self.assertTrue(paths.open_file(self.path))
