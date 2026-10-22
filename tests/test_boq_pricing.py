@@ -165,6 +165,19 @@ class TheExportsWriteWhatTheGridShows(unittest.TestCase):
         self.assertTrue(any("*" in f for f in formulas), formulas[:5])   # =Qty*Rate
         self.assertTrue(any("SUM" in f for f in formulas), formulas[:5])
 
+    def test_docx_has_the_same_grid_and_totals_as_every_other_format(self):
+        """Item 10: "BOQ in any format gets filled in with the number from
+        the pricing list" — xlsx/csv/pdf already did this; Word did not."""
+        import docx
+        path = self.t.export("docx", os.path.join(self.dir, "boq.docx"))
+        self.assertTrue(os.path.exists(path))
+        d = docx.Document(path)
+        table_text = [c.text for t in d.tables for r in t.rows for c in r.cells]
+        self.assertIn("EP", table_text)
+        self.assertIn("4,500.00", table_text)
+        self.assertIn("99,000.00", table_text)
+        self.assertTrue(any("GRAND TOTAL" in c for c in table_text))
+
     def test_the_save_button_reports_where_it_went(self):
         target = os.path.join(self.dir, "chosen.csv")
         with mock.patch.object(pricing.QFileDialog, "getSaveFileName",
@@ -189,15 +202,45 @@ class TheDialogShowsTheCardOnceMeasured(unittest.TestCase):
                 mock.patch.object(CB.config, "save_artifact"):
             d._on_measured(dict(Q), [])
 
-    def test_hidden_before_and_shown_after_the_measurement(self):
+    def test_hidden_before_and_still_hidden_right_after_measuring(self):
+        """The owner's report: the card sat there, visible and inert,
+        before "Make my BOQ" had even been pressed — read as a static,
+        useless section rather than a deliberate next step. The data is
+        ready as soon as measuring finishes (rows populate), but the box
+        itself only shows once a BOQ actually exists — see the two tests
+        below."""
         d = self._dialog()
         self.assertFalse(d.price_box.isVisibleTo(d))
         self._measure(d)
-        self.assertTrue(d.price_box.isVisibleTo(d))
+        self.assertFalse(d.price_box.isVisibleTo(d))
         self.assertEqual(len(d.price_table.rows()), 5)
         # The measured table and the prompt text are untouched by pricing.
         self.assertEqual(len(d.meas_table.rows()), 5)
         self.assertIn("LENGTHS BY LAYER", d.summary)
+
+    def test_shown_once_a_boq_is_actually_written(self):
+        d = self._dialog()
+        self._measure(d)
+        d.writer_agent = "Claude"
+        d.request = "BOQ for the site"
+        d._write_made_files = []
+        # texts is non-empty, so _on_written ends by opening the follow-up
+        # offer -- a real FollowupDialog.exec() would hang here forever
+        # (CLAUDE.md: never exec()/a QEventLoop in a test), the same trap
+        # every other BOQ test that reaches this path already avoids.
+        with mock.patch("dialogs.followup_dialog.FollowupDialog") as fake:
+            fake.return_value.submitted.return_value = False
+            d._on_written({"format": ["1  Brick wall  12.00  m"]}, {})
+        self.assertTrue(d.price_box.isVisibleTo(d))
+
+    def test_a_write_up_with_nothing_back_leaves_it_hidden(self):
+        d = self._dialog()
+        self._measure(d)
+        d.writer_agent = "Claude"
+        d.request = "BOQ for the site"
+        d._write_made_files = []
+        d._on_written({"format": []}, {})
+        self.assertFalse(d.price_box.isVisibleTo(d))
 
     def test_a_bom_is_a_parts_list_and_does_not_price(self):
         d = self._dialog(mode="bom")

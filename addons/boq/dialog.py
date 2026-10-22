@@ -45,6 +45,18 @@ VERIFY_PROMPT = (
     "whole BOQ in the same format as the previous answer with the corrected "
     "figures, and list what changed.")
 
+# "Make with drawing" pressed before any BOQ exists yet -- there is no
+# previous answer to remake, so this does NOT reuse VERIFY_PROMPT's "remake
+# in the same format... list what changed" framing, which only makes sense
+# once something has already been written. Same job either way (read the
+# drawing itself, not just the measured figures), different starting point.
+MAKE_WITH_DRAWING_PROMPT = (
+    "Make the whole BOQ by reading the attached drawing directly, not only "
+    "the measured figures below. The measured figures were computed locally "
+    "from the same drawing -- use them as a cross-check, and where your own "
+    "reading of the drawing disagrees with a measured figure, say so and use "
+    "the drawing's own value.")
+
 
 def _preselect(combo: QComboBox, value: str):
     """Select `value` in the combo if it is one of the options; otherwise
@@ -116,6 +128,15 @@ class BoqDialog(PrismDialog):
         self._standards = ""
         self._brief = ""        # the interpreter's legend & scope brief
         self._links: dict = {}
+        # Who answered most recently, and that exact chat's own URL -- a
+        # follow-up by the SAME agent resumes THIS chat (resume_urls, see
+        # _fu_start_next) instead of a fresh one opening every time, the
+        # same mechanism addons/step/dialog.py already uses. Empty link
+        # (Groq, which has no browser page at all) means resume simply
+        # never triggers -- nothing special-cased for that, it falls out
+        # of the same check.
+        self._last_agent = ""
+        self._last_link = ""
         # The latest real file an AI stage actually produced (write-up,
         # verify-and-remake or a follow-up) — as opposed to self.csv_path,
         # which is the LOCALLY measured quantities, made before any AI runs
@@ -125,6 +146,9 @@ class BoqDialog(PrismDialog):
         self._deliverable_path = ""
         self._write_made_files: list = []
         self._fu_made_files: list = []
+        # One live-progress window for every verify/follow-up this BOQ
+        # session makes, not one per click — see _start_followup_run.
+        self._fu_dialog = None
         # Accumulated across the stage chain so the main window can offer its
         # post-completion follow-up once this dialog closes: every stage's
         # output, and which agent produced it. The dialog runs its own worker
@@ -188,6 +212,25 @@ class BoqDialog(PrismDialog):
             dxf_note.setObjectName("note")
             dxf_note.setWordWrap(True)
             root.addWidget(dxf_note)
+
+        # The engine already treats a sample/previous BOQ as its own role
+        # (core.boq.classify_inputs's "templates", described to the writer
+        # as "an example BOQ showing the firm's usual style") -- attaching
+        # one through the same "Add file" box above already worked. What
+        # was missing was telling the user it is even possible: nothing
+        # said so, so nobody attached one on purpose. _absorb() below fills
+        # this in once a template actually lands; until then it stands as
+        # an invitation, with the one reassurance the owner asked for —
+        # that this is NOT the drawing, and the drawing is handled
+        # separately (see "Make with drawing").
+        self.template_hint = QLabel(i18n.t(
+            "You can also attach a sample BOQ or your usual template above "
+            "— Prism will match its style, logo and layout. This is "
+            "separate from the drawing, which is only ever sent to an AI "
+            "after you say so, in \"Make with drawing\"."))
+        self.template_hint.setObjectName("note")
+        self.template_hint.setWordWrap(True)
+        root.addWidget(self.template_hint)
 
         # Only appears once a drawing has actually been measured.
         self.meas_box = QGroupBox("Measured from your drawing")
@@ -318,7 +361,15 @@ class BoqDialog(PrismDialog):
                                     on_click=self._open_link)
         self.open_btn.setEnabled(False)
         self.footer.add_utility(self.open_btn)
-        self.recheck_btn = self.button(i18n.t("Recheck with the drawing"), "secondary",
+        # Same job "Verify and remake" (the follow-up window's quick action)
+        # already does -- read the drawing itself, not just the measured
+        # figures -- so one button now covers both: pressed before any BOQ
+        # exists, it MAKES the BOQ straight from the drawing; pressed after
+        # one exists, it rechecks/corrects it, same as before. Enabled by a
+        # drawing alone (see _on_measured), not by also requiring a result
+        # first -- that was the one thing stopping it standing beside
+        # "Make my BOQ" from the start.
+        self.recheck_btn = self.button(i18n.t("Make with drawing"), "secondary",
                                        icon_name="eye", small=True,
                                        on_click=self._ask_recheck)
         self.recheck_btn.setEnabled(False)
@@ -357,9 +408,25 @@ class BoqDialog(PrismDialog):
         # add_paths dedupes on its own now — re-emitting would re-enter here
         # and classify every file (and re-count templates/images) twice.
         self.ask.add_paths([a["path"] for a in atts], emit=False)
+        if templates:
+            self._update_template_hint()
         if cad:
             self.cad_path = cad[0]["path"]
             self._measure()
+
+    def _update_template_hint(self):
+        """Turns the standing invitation above into a confirmation once a
+        sample/template BOQ has actually been attached — count included,
+        so a second one landing is visibly noticed too, not silently
+        folded into the same unchanged sentence."""
+        n = len(self.templates)
+        word = (i18n.t("sample template") if n == 1
+               else i18n.t("sample templates"))
+        self.template_hint.setText(
+            i18n.t("{n} {word} attached — Prism will match the style "
+                  "shown. The drawing itself is only ever sent to an AI "
+                  "after you say so, in \"Make with drawing\".")
+            .replace("{n}", str(n)).replace("{word}", word))
 
     # ── measuring ───────────────────────────────────────────────────────
 
@@ -369,9 +436,19 @@ class BoqDialog(PrismDialog):
         self.progress.set_stage(0)
         self._set_busy(True, f"Reading {os.path.basename(self.cad_path)} — "
                              "a large drawing can take a minute…")
+        # HVAC_DRAWING_RULES.md's rules only ever apply when the person's
+        # own request says "HVAC" — the owner's own instruction (22 Oct
+        # 2026): trade-specific rules must not quietly start reading an
+        # electrical or plumbing drawing's lines differently too, just
+        # because the geometry happens to look similar. Read from the ask
+        # box directly (not self.request, which isn't set until "Make" is
+        # pressed, well after this runs) — type "HVAC" into the request
+        # before or alongside attaching the drawing for this to catch it.
+        hvac = "hvac" in self.ask.text().lower()
         self._measure_worker = MeasureWorker(
             self.cad_path, self.unit_edit.text().strip(),
-            [s.strip() for s in self.scope_edit.text().split(",") if s.strip()])
+            [s.strip() for s in self.scope_edit.text().split(",") if s.strip()],
+            hvac=hvac)
         self._measure_worker.done.connect(self._on_measured)
         self._measure_worker.failed.connect(self._on_measure_failed)
         self._measure_worker.start()
@@ -382,9 +459,14 @@ class BoqDialog(PrismDialog):
         self.meas_table.set_quantities(q)
         self.meas_box.setVisible(True)
         if self.mode == "boq":
+            # Data is ready now, but the box itself stays hidden until a
+            # BOQ actually exists (see _on_written) -- the owner's report:
+            # it sat there, visible and inert, before "Make my BOQ" was
+            # even pressed, which read as a static, useless section
+            # rather than a deliberate next step once there was something
+            # to price.
             self.price_table.set_quantities(
                 q, title=f"Bill of Quantities — {getattr(self, 'request', '') or 'measured drawing'}")
-            self.price_box.setVisible(True)
 
         os.makedirs(CB.config.RUNS_DIR, exist_ok=True)
         self.csv_path = os.path.join(
@@ -403,10 +485,19 @@ class BoqDialog(PrismDialog):
                 task=task_label)
         except Exception:                               # noqa: BLE001
             pass
-        note = "  ".join(notes)
+        # `notes` is the CONVERTER's own notes (MeasureWorker.done's second
+        # value, e.g. a DWG repair) — a different list from q["notes"]
+        # (measurement-level findings, e.g. HVAC_DRAWING_RULES.md rule 1's
+        # "read N pairs as one run"). Both belong here: this line is the
+        # one place a person actually sees what Prism did to a number
+        # before trusting it.
+        note = "  ".join(list(notes) + list(q.get("notes") or []))
         self.csv_label.setText(
             f"Saved so you can check every number → {self.csv_path}"
             + (f"\n⚠ {note}" if note else ""))
+        # "Make with drawing" needs nothing but the drawing itself -- it no
+        # longer waits for "Make my BOQ" to be pressed first.
+        self.recheck_btn.setEnabled(bool(self.cad_path))
         self._set_busy(False, "Measured from the drawing itself — not by an AI.")
         # If the user already pressed "Make my BOQ" while this was measuring,
         # start it now — with the measured quantities it was waiting for.
@@ -753,6 +844,11 @@ class BoqDialog(PrismDialog):
         self._links.update(links)
         self._all_responses.update(responses)
         self._stage_agents_map["format"] = self.writer_agent
+        # Who to resume, and where -- see _fu_start_next. Groq has no
+        # browser page at all, so links.get("format") is empty for it and
+        # resume never triggers; that is correct, not a gap to fill in.
+        self._last_agent = self.writer_agent
+        self._last_link = links.get("format") or self._last_link
         self._lap("format")
         # How long the whole BOQ took, and where the time went — the stages are
         # web round-trips of tens of seconds each, so "why did that take three
@@ -769,7 +865,12 @@ class BoqDialog(PrismDialog):
                 + "Check the numbers against the saved file above.")
         self._save_deliverable(self._write_made_files, "format")
         self.open_btn.setEnabled(bool(self._links.get("format")))
-        self.recheck_btn.setEnabled(bool(self.cad_path) and bool(texts))
+        self.recheck_btn.setEnabled(bool(self.cad_path))
+        # "Price it" becomes available once there is a BOQ to price, not
+        # before — the box's data has been ready since _on_measured, only
+        # its visibility was moved here.
+        if self.mode == "boq" and texts:
+            self.price_box.setVisible(True)
         task_label = getattr(self, "_task_name", "") or f"{self._noun} — {self.request}"
         CB.config.save_run({
             "query": task_label, "responses": responses,
@@ -789,7 +890,7 @@ class BoqDialog(PrismDialog):
             self.progress.set_message(message)
         self.progress.setVisible(busy)
         self.run_btn.setEnabled(not busy)
-        self.recheck_btn.setEnabled(not busy and bool(self.cad_path and self.result.toPlainText().strip()))
+        self.recheck_btn.setEnabled(not busy and bool(self.cad_path))
         self.status.setText("" if busy else message)   # the loader carries it while busy
 
     def _drawing_consent(self) -> bool:
@@ -818,7 +919,14 @@ class BoqDialog(PrismDialog):
             return
         if not self._drawing_consent():
             return
-        self._send_followup(VERIFY_PROMPT, [CB.files.attach(self.cad_path)], verify=True)
+        # No BOQ made yet -- "Make with drawing" is the FIRST thing this
+        # session does, not a recheck of something already written, so
+        # there is no previous answer to remake. VERIFY_PROMPT's own
+        # wording ("remake... in the same format as the previous answer...
+        # list what changed") only makes sense once one exists.
+        note = (VERIFY_PROMPT if self.result.toPlainText().strip()
+               else MAKE_WITH_DRAWING_PROMPT)
+        self._send_followup(note, [CB.files.attach(self.cad_path)], verify=True)
 
     def _send_followup(self, note: str, extra_files: list, verify: bool):
         agent = self.writer_combo.currentText().strip() or "the writing AI"
@@ -835,8 +943,14 @@ class BoqDialog(PrismDialog):
                                 "read the drawing or an attached file. Pick "
                                 "a different tool in 'Write with' for this.")
             return
-        prompt = (f"{note}\n\nMEASURED FIGURES:\n{self.summary}\n\n"
-                  f"PREVIOUS ANSWER:\n{self.result.toPlainText()}")
+        prompt = f"{note}\n\nMEASURED FIGURES:\n{self.summary}"
+        # Only when there IS one -- "Make with drawing" pressed before any
+        # BOQ exists has nothing previous to show, and an empty section
+        # ("PREVIOUS ANSWER:\n\n") would read as a previous answer that
+        # happens to be blank rather than there being none at all.
+        previous = self.result.toPlainText().strip()
+        if previous:
+            prompt += f"\n\nPREVIOUS ANSWER:\n{previous}"
         files = list(extra_files) + list(self.templates) + list(self.notes)
         if agent != "Groq":
             # No browser page for Groq, so no file to produce or download —
@@ -863,7 +977,12 @@ class BoqDialog(PrismDialog):
     # fallback/Stop wired to the real AutomationWorker — see
     # addons/boq/run_dialog.py's module docstring for exactly what each
     # control does and does not do, and why. _fu_* holds this one run's
-    # state; a new _send_followup call always starts a fresh one.
+    # state; one BoqRunDialog is kept for the whole BOQ session (see
+    # self._fu_dialog's init) and restart() carries it into the next job,
+    # the same way main_window.py's single OutputPanel carries the core
+    # Run screen from stage to stage — a fresh window popping up for
+    # "Verify and remake" after an ordinary follow-up read as a brand new,
+    # disconnected run instead of a continuation of this one.
     def _start_followup_run(self, stage: str, agent: str, prompt: str,
                             files: list):
         from addons.boq.run_dialog import BoqRunDialog
@@ -875,7 +994,17 @@ class BoqDialog(PrismDialog):
         self._fu_stopped = False
         self._fu_skipped = False
         self._fu_token = 0
-        titles = {"recheck": i18n.t("Verifying against the drawing"),
+        # "recheck" covers two different moments now: "Make with drawing"
+        # pressed before any BOQ exists (nothing to verify yet -- making
+        # it) and the same button, or "Verify and remake", pressed once
+        # one does. `prompt` already carries "PREVIOUS ANSWER:" only in
+        # the second case (see _send_followup) -- cheaper and more
+        # reliable than re-checking self.result here, which may no longer
+        # match what this particular call was actually built from.
+        making_from_scratch = stage == "recheck" and "PREVIOUS ANSWER:" not in prompt
+        titles = {"recheck": (i18n.t("Making your BOQ from the drawing")
+                              if making_from_scratch
+                              else i18n.t("Verifying against the drawing")),
                  "followup": i18n.t("Carrying your follow-up on")}
         # Verify-and-remake reads the drawing itself, not just a chat reply
         # — the owner's own report is ~20 minutes for that, far past what a
@@ -884,13 +1013,25 @@ class BoqDialog(PrismDialog):
         notes = {"recheck": i18n.t(
             "{agent} is reading the drawing itself, not just answering from "
             "memory — this can take up to 20 minutes.").replace("{agent}", agent)}
-        self._fu_dialog = BoqRunDialog(titles[stage], stage, agent, parent=self,
-                                       note=notes.get(stage, ""))
-        self._fu_dialog.skip_requested.connect(self._fu_on_skip)
-        self._fu_dialog.fallback_requested.connect(self._fu_on_fallback)
-        self._fu_dialog.stop_requested.connect(self._fu_on_stop)
+        title = titles[stage]
+        note = notes.get(stage, "")
+        if self._fu_dialog is None:
+            self._fu_dialog = BoqRunDialog(title, stage, agent, parent=self,
+                                           note=note)
+            self._fu_dialog.skip_requested.connect(self._fu_on_skip)
+            self._fu_dialog.fallback_requested.connect(self._fu_on_fallback)
+            self._fu_dialog.stop_requested.connect(self._fu_on_stop)
+        else:
+            self._fu_dialog.restart(title, stage, agent, note=note)
         self._fu_start_next()
-        self._fu_dialog.exec()
+        # show(), not exec(): a modal exec() enters its own event loop and
+        # only returns once the window closes, so the SAME instance could
+        # never be reused for a later job without first destroying it.
+        # setModal(True) in __init__ already keeps this BOQ dialog from
+        # being clicked underneath it.
+        self._fu_dialog.show()
+        self._fu_dialog.raise_()
+        self._fu_dialog.activateWindow()
 
     def _fu_start_next(self):
         if not self._fu_chain:
@@ -910,6 +1051,16 @@ class BoqDialog(PrismDialog):
         self._set_busy(True, f"{tool} is working on your {self._noun}…")
         self._fu_dialog.set_agent(tool)
         self._fu_made_files: list = []
+        # The real fix for "every follow-up opens a fresh tab": resume the
+        # SAME chat this exact tool already answered in, keyed by THIS
+        # call's own stage name (automation.py's _open_agent_page looks
+        # resume_urls up by the stage it is about to run, not by whichever
+        # stage the link was originally saved under) — never across a
+        # fallback to a DIFFERENT tool, which has no chat of its own to
+        # resume. addons/step/dialog.py's _on_answer_followup does the
+        # identical check for the same reason.
+        resume = ({self._fu_stage: self._last_link}
+                 if tool == self._last_agent and self._last_link else None)
         self._worker = AutomationWorker(
             {}, self.cfg, self._fu_files,
             # The actual prompt, not a short task label — this is what the
@@ -928,7 +1079,8 @@ class BoqDialog(PrismDialog):
             min_wait=1200 if self._fu_stage == "recheck" else 0,
             # So _fu_on_done can learn what, if anything, got produced —
             # nothing surfaced this before (see _save_deliverable).
-            files_out=self._fu_made_files)
+            files_out=self._fu_made_files,
+            resume_urls=resume)
         self._worker.done.connect(
             lambda responses, links, t=token: self._fu_on_done(t, responses, links))
         self._worker.failed.connect(
@@ -989,6 +1141,11 @@ class BoqDialog(PrismDialog):
         self._links.update(links)
         self._all_responses.update(responses)
         self._stage_agents_map[stage] = self._followup_agent
+        # Updated on EVERY stage, not only the first write-up -- a third
+        # follow-up by the same agent must resume the SECOND follow-up's
+        # chat, not keep reaching back to the very first one.
+        self._last_agent = self._followup_agent
+        self._last_link = links.get(stage) or self._last_link
         self._lap(stage)
         texts = [t for t in (responses.get(stage) or []) if t.strip()]
         if texts:
@@ -997,6 +1154,12 @@ class BoqDialog(PrismDialog):
         else:
             self.status.setText(i18n.t("Nothing came back. The previous answer is still shown."))
         self.open_btn.setEnabled(bool(self._links.get(stage) or self._links.get("format")))
+        # "Make with drawing" pressed before any BOQ existed (item 8) is
+        # also a real first BOQ, produced through this handler rather than
+        # _on_written -- "Price it" must become available here too, not
+        # only after the ordinary "Make my BOQ" path.
+        if self.mode == "boq" and texts:
+            self.price_box.setVisible(True)
         self._offer_followup()
 
     def _offer_followup(self):

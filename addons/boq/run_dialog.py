@@ -15,6 +15,16 @@ its own set_agent()) when the work hands over to a fallback tool, the
 same way a real failover reuses a card in the real Run screen rather than
 stacking a second one.
 
+The same "reused in place" rule now holds across jobs, not only within
+one: addons/boq/dialog.py keeps ONE BoqRunDialog alive for the life of a
+BOQ session and calls restart() for every later verify/follow-up instead
+of building a second window — the same way main_window.py keeps ONE
+OutputPanel for the app's whole run screen rather than one per stage.
+Before this, "Verify and remake" after an ordinary follow-up (or a second
+follow-up after the first) popped a brand new window each time, reading
+as a fresh, disconnected run instead of a continuation of the one the
+BOQ was already shown in.
+
 Skip and Stop call straight through to the real, already-working
 workers.AutomationWorker.skip()/.stop() -- generic, stage-name-independent
 primitives the engine already polls inside every wait, custom_stages or
@@ -65,10 +75,10 @@ class BoqRunDialog(QDialog):
         root.setSpacing(theme.SPACE_3)
 
         root.addWidget(C.kicker(i18n.t("Working now")))
-        head = QLabel(title)
-        head.setObjectName("h4")
-        head.setWordWrap(True)
-        root.addWidget(head)
+        self._head = QLabel(title)
+        self._head.setObjectName("h4")
+        self._head.setWordWrap(True)
+        root.addWidget(self._head)
 
         self.card = StageCard(stage, agent, index=1)
         self.card.set_state("running")
@@ -79,6 +89,7 @@ class BoqRunDialog(QDialog):
         if note:
             self.card.set_note(note)
         root.addWidget(self.card)
+        self._card_row = root
 
         row = QHBoxLayout()
         row.setSpacing(theme.SPACE_2)
@@ -107,6 +118,27 @@ class BoqRunDialog(QDialog):
                                   on_click=self.accept)
         self.close_btn.setEnabled(False)
         root.addWidget(self.close_btn)
+
+    # ── reuse for the NEXT job, instead of a second window ─────────────────
+    def restart(self, title: str, stage: str, agent: str, note: str = ""):
+        """The same window, for a new verify/follow-up call. Undoes _lock(),
+        swaps the card for a fresh one at this stage/agent (StageCard has no
+        public reset of its own timeline dot or elapsed clock, and a stale
+        "done"/"error" card redrawn as "running" would still carry the old
+        one's history), and reopens Skip/Use fallback/Stop."""
+        self._done = False
+        self.setWindowTitle(i18n.t("Working"))
+        self._head.setText(title)
+        old_card = self.card
+        self.card = StageCard(stage, agent, index=1)
+        self.card.set_state("running")
+        if note:
+            self.card.set_note(note)
+        self._card_row.replaceWidget(old_card, self.card)
+        old_card.deleteLater()
+        for w in (self.skip_btn, self.fallback_btn, self.stop_btn):
+            w.setEnabled(True)
+        self.close_btn.setEnabled(False)
 
     # ── inbound state -- the caller drives the card from worker signals ────
     def set_agent(self, agent: str):

@@ -486,15 +486,17 @@ class MeasureWorker(_Worker):
     done = Signal(object, list)      # quantities dict, converter notes
     failed = Signal(str)
 
-    def __init__(self, path: str, unit: str = "", scope: list | None = None):
+    def __init__(self, path: str, unit: str = "", scope: list | None = None,
+                 hvac: bool = False):
         super().__init__()
         self.path, self.unit, self.scope = path, unit, scope or []
+        self.hvac = hvac
 
     def run(self):
         try:
             boq = CB.get_boq()
             dxf_path, notes = boq.ensure_dxf(self.path)
-            q = boq.measure(dxf_path)
+            q = boq.measure(dxf_path, hvac=self.hvac)
             if self.unit:
                 boq.apply_known_unit(q, self.unit)
             if self.scope:

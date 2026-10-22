@@ -368,3 +368,495 @@ every add-on, not just BOQ.
 All six items from the owner's 2026-10-20/21 list are now done, except
 item 3's "stage two" (handing Groq-inhouse's text answer to a second,
 user-chosen agent for file conversion) — still open, tracked above.
+
+## 7. "Verify and remake" opened a fresh window instead of continuing the one already on screen
+
+Noted 2026-10-22, from the owner. **Done (2026-10-22).**
+
+**What happened:** after a BOQ is written (without the drawing ever
+touching the AI — the engine is handed the measured figures only), the
+owner's usual move is "Verify and remake": send the DWG file itself so an
+agent can check the measured quantities against it. Instead of carrying
+on in the live-progress window the ordinary follow-up (or the write-up
+itself) was already shown in, pressing it — or running a plain
+follow-up, then "Verify and remake" straight after — popped a brand new
+`BoqRunDialog` window each time. The owner wanted this to work the way
+Prism core's own Run screen does: ONE window for the session, carried
+from job to job, not a fresh one per click — the two genuinely different
+DWG-sending moments ("Recheck with drawing," before the main pipeline
+even runs, versus "Verify and remake" after a BOQ already exists) were
+never the issue; the window itself was the thing resetting.
+
+What shipped:
+  - **`addons/boq/run_dialog.py`**: `BoqRunDialog.restart(title, stage,
+    agent, note="")` — undoes a prior `finish_*()` lock, swaps in a fresh
+    `StageCard` for the new stage/agent (a stale "done"/"error" card
+    redrawn as "running" would still carry the old job's timeline dot and
+    elapsed clock, so a new one replaces it via the stored layout
+    reference, `self._card_row`, rather than reusing the old widget), and
+    re-enables Skip / Use fallback / Stop while relocking Close.
+  - **`addons/boq/dialog.py`**: `self._fu_dialog` is now initialised once
+    in `__init__` (`None`) and kept for the life of the dialog.
+    `_start_followup_run` builds a `BoqRunDialog` only the FIRST time;
+    every later call — a second follow-up, "Verify and remake" after one,
+    a follow-up after a recheck, any order — calls `restart()` on the
+    SAME instance instead.
+  - **`.exec()` → `.show()` + `.raise_()` + `.activateWindow()`**: the old
+    code's modal `.exec()` enters its own blocking event loop and only
+    returns once the window closes, so the same instance could never be
+    reused for a later job without destroying it first. `setModal(True)`
+    (already set in `__init__`) keeps the BOQ dialog from being clicked
+    underneath it either way — this is the same non-blocking pattern
+    `main_window.py` uses for its one, app-lifetime `OutputPanel`.
+  - Tests: 3 in `tests/test_boq_dialog.py::TheLiveWindowIsReusedAcrossFollowUps`
+    (verify-and-remake after a follow-up reuses the window and not a
+    second one; a third call restarts again rather than building a
+    third; the window is shown, never exec()'d, so no test can hang) + 4
+    in `tests/test_boq_run_dialog.py::RestartReusesTheWindowForTheNextJob`
+    (restart undoes a lock, swaps the card, drops the old note, and can
+    finish again afterwards) + `_FakeRunDialog` in `test_boq_dialog.py`
+    gained `restart()`/`show()`/`raise_()`/`activateWindow()` and a
+    `construct_calls` counter so a test can tell a reuse from a rebuild.
+    81/81 across both BOQ dialog test files, full suite unaffected
+    (nothing outside BOQ touches `BoqRunDialog`).
+
+**CORRECTION, 2026-10-22, same day — the fix above was real but incomplete,
+and marking it "Done" without catching that was wrong.** The owner tested
+it: "Make with drawing," then a follow-up ("generate a docx of this") on
+top of it still opened a fresh browser tab/chat — and the same thing
+happened following up after an ordinary "Make my BOQ". What shipped above
+fixed Prism's OWN small progress popup (`BoqRunDialog`) — a real, correct
+fix, and still needed — but it is not what "opens a new tab" meant. The
+actual new tab is the BROWSER's own tab for the writing agent's chat
+(Claude.ai / ChatGPT, etc.), controlled entirely separately, inside
+`prism_terminal/core/automation.py` — a layer the first pass of this item
+never looked at. Caught only because the owner tested the real app end to
+end rather than trusting the earlier write-up.
+
+**What was actually wrong:** the engine already has a working mechanism
+for exactly this — `resume_urls`, a `{stage: chat_url}` dict passed into
+`AutomationWorker`/`automation.run()` that tells it to navigate straight
+back to an existing conversation instead of opening a fresh tab
+(`core/automation.py`'s `_open_agent_page` checks it before deciding
+whether to open a new tab at all). `addons/step/dialog.py`'s own
+follow-up handler already uses it correctly. **`addons/boq/dialog.py`
+simply never called it, on any follow-up, ever** — every `_send_followup`
+call built a brand-new `custom_stages` job with no `resume_urls`, so the
+engine had no way to know a chat already existed to go back to, and
+always opened a new one. BOQ already tracked everything needed to fix
+this (`self._stage_agents_map`, `self._links`) — the pieces existed, nobody
+had wired them to this specific parameter.
+
+**The actual fix:**
+  - **`addons/boq/dialog.py`**: two new fields, `self._last_agent` /
+    `self._last_link` — "who answered most recently, and that exact
+    chat's own URL" — updated at the end of EVERY completed stage
+    (`_on_written` for the first write-up, `_on_followed_up` for every
+    follow-up/recheck after it, so a third follow-up resumes the SECOND
+    one's chat, not reaches back to the very first).
+  - **`_fu_start_next`** now builds `resume_urls = {self._fu_stage:
+    self._last_link} if tool == self._last_agent and self._last_link else
+    None` before constructing the `AutomationWorker`, and passes it
+    through. Guarded on the SAME agent answering again — switching
+    agents (or falling back to a different one mid-chain after a
+    failure) correctly resumes nothing, because there is no chat of that
+    OTHER tool's to go back to; it falls through to the existing
+    full-context prompt instead, exactly as before. The same check
+    `addons/step/dialog.py`'s `_on_answer_followup` already makes, not a
+    new pattern invented for BOQ.
+  - Groq's own branch in `_send_followup` is untouched and unaffected —
+    it has no browser page at all, so `self._last_link` stays empty
+    whenever Groq last answered, and resume correctly never triggers for
+    it, with no special-casing needed.
+  - 6 new tests in `tests/test_boq_dialog.py::
+    AFollowUpResumesTheSameChatInsteadOfOpeningAFreshOne`: a first
+    write-up leaves its chat resumable; a same-agent follow-up actually
+    gets `resume_urls`; switching agents gets `None`; a SECOND follow-up
+    resumes the FIRST follow-up's chat, not the original write-up's;
+    "Make with drawing" as the very first action (nothing to resume yet)
+    gets `None`; a mid-chain fallback to a different tool also gets
+    `None`. 136/136 across the full BOQ+BOM+site-facts sweep.
+  - **Said plainly, for the record:** the first pass at item 7 was
+    reported as "Done" without actually tracing where a new browser tab
+    comes from in the engine — it fixed a real problem, just not the one
+    that was reported, and that gap wasn't caught until the owner tested
+    it directly. The fix above is now verified against the actual
+    mechanism that opens a tab, not just against Prism's own popup.
+
+## 8. "Recheck with the drawing" and "Verify and remake" are the same job — renamed and made available from the start
+
+Noted 2026-10-22, from the owner. **Done (2026-10-22).**
+
+**The owner's point:** "Verify and remake" (the follow-up window's quick
+action) and "Recheck with the drawing" (the button next to the result box)
+send the exact same thing — the drawing file itself, with explicit consent
+— to do the exact same job. The button should be renamed **"Make with
+drawing"** and stand next to **"Make my BOQ"** from the start, not stay
+disabled until a BOQ already exists: "Make my BOQ" uses the offline
+measured quantities alone; "Make with drawing" gives the drawing file to
+the AI directly, after asking permission again.
+
+What shipped:
+  - **Button renamed** — `i18n.t("Recheck with the drawing")` →
+    `i18n.t("Make with drawing")`. `devtools/extract_strings.py` run after:
+    2 new strings, 1 retired.
+  - **Enabled by a drawing alone, not by also requiring an existing
+    answer.** Previously gated on `bool(self.cad_path) and bool(texts)`
+    (three separate spots: construction, after a write-up, and
+    `_set_busy`) — now just `bool(self.cad_path)`, and also turned on the
+    moment a drawing finishes measuring (`_on_measured`), not only after
+    "Make my BOQ" has already run once. This is the actual fix: before,
+    the button genuinely could not be pressed until a BOQ existed, which
+    is why it only ever behaved like a recheck.
+  - **One new prompt, used only when there is nothing to verify yet** —
+    `MAKE_WITH_DRAWING_PROMPT`, next to the existing `VERIFY_PROMPT`.
+    `VERIFY_PROMPT`'s own wording ("remake... in the same format as the
+    previous answer... list what changed") only makes sense once an
+    answer exists; pressing "Make with drawing" before any BOQ is written
+    now sends the new prompt instead, asking the agent to read the
+    drawing directly and cross-check it against the locally measured
+    figures.
+  - **The "PREVIOUS ANSWER" section is now conditional**, not always
+    appended — `_send_followup` only adds it when `self.result` actually
+    has text. Before this, pressing the button with no existing answer
+    would have sent `"PREVIOUS ANSWER:\n\n"`, which reads as a blank
+    previous answer rather than there being none.
+  - **The live-progress window's title branches the same way** —
+    "Making your BOQ from the drawing" when there is nothing previous
+    (checked off whether the built prompt actually contains
+    `"PREVIOUS ANSWER:"`, not by re-reading `self.result`, which could in
+    principle have changed by the time the window opens), "Verifying
+    against the drawing" otherwise — unchanged from before this item.
+  - Both call sites still reach the SAME engine stage key, `"recheck"` —
+    no change needed in `prism_terminal/core/contract.py`'s
+    `_WRITING_STAGES` or anywhere else engine-side; only the prompt text
+    and the window title differ between the two moments.
+  - 5 new tests in `tests/test_boq_dialog.py` (the button's new label; on
+    even with no answer yet; the no-previous-answer prompt omits
+    "PREVIOUS ANSWER" and reads as making, not verifying, with the
+    matching window title; the with-previous-answer path is unchanged)
+    + the one stale test from item 2's era renamed to describe what is
+    actually true now instead of what used to be true. 110/110 across
+    the full BOQ+BOM sweep (`test_boq_dialog.py`, `test_boq_run_dialog.py`,
+    `test_boq_file_guardrail.py`, `test_boq_pricing.py`).
+
+## 9. A sample BOQ/template as a reference — discoverable, without sending the drawing
+
+Noted 2026-10-22, from the owner. **Done (2026-10-22).**
+
+**What was asked:** "there should be option for the user to just give in
+the sample BOQs/template for the BOQs... such that they could be given as
+the reference to the AI for creation of better BOQs without actually
+giving the drawing file to the AIs."
+
+**What was actually true before this item:** the mechanism already
+existed and already worked exactly as asked — `prism_terminal/core/
+boq.py:classify_inputs` has always sorted an attached sample/previous BOQ
+(`.docx`/`.doc`/`.xlsx`/`.xls`/`.csv`/`.ods`/`.pdf`) into its own
+`templates` role, described to the writing agent as "an example BOQ
+showing the firm's usual style" — and the drawing is a SEPARATE role
+(`cad`) that is never folded into it. This was never built in this
+session; checked directly in the engine before touching anything. The
+real problem was pure discoverability: nothing on screen ever told the
+user a sample/template could be attached at all, so in practice nobody
+attached one on purpose.
+
+What shipped:
+  - **A standing invitation**, `self.template_hint`, under the drawing
+    format note: "You can also attach a sample BOQ or your usual
+    template above — Prism will match its style, logo and layout. This
+    is separate from the drawing, which is only ever sent to an AI after
+    you say so, in 'Make with drawing'." — naming item 8's button
+    directly, so the one reassurance the owner asked for (the drawing is
+    not swept up in this) sits right next to the invitation, not in a
+    different part of the screen.
+  - **Turns into a confirmation once one actually lands** —
+    `_update_template_hint()`, called from `_absorb()` whenever
+    `classify_inputs` returns at least one template: "N sample
+    template(s) attached — Prism will match the style shown. [same
+    drawing reassurance]", singular/plural worded correctly, the count
+    rising as more are attached rather than resetting.
+  - **Scope, stated plainly**: no change to `classify_inputs`, no change
+    to what gets sent to the AI or how — this item is screen text only,
+    making an existing, already-correct behaviour visible and trustable.
+  - 4 new tests in
+    `tests/test_boq_dialog.py::AttachingASampleTemplateIsDiscoverableAndConfirmed`
+    (the standing invitation's wording before anything is attached;
+    attaching one confirms it with a count and still names "Make with
+    drawing"; a second one updates the count and pluralises; a plain
+    `.txt` note — classified as "notes", not "templates" — leaves the
+    hint alone). `devtools/extract_strings.py` run after: 4 new strings,
+    none removed. 114/114 across the full BOQ+BOM sweep.
+
+## 10. "Price it" sat there, static and useless, before a BOQ even existed
+
+Noted 2026-10-22, from the owner, with a screenshot. **Done (2026-10-22)
+— both parts, after the owner's own clarification resolved the tension
+part two originally flagged.**
+
+**What was reported:** the "Price it (optional)" card appeared right
+after a drawing was measured — before "Make my BOQ" had even been
+pressed — sitting there empty and inert. The owner's own words: "this is
+now staying static and honestly this is useless, as we can decide the
+pricing based on just the measured quantities, we can add this feature
+once the BOQ is formed." Proposed flow: form the BOQ first; once it
+exists, let the user bring a price list as a later, deliberate step, and
+"use the groq-inhouse agent to fill in the details in the BOQ document
+that are already made like excel and word."
+
+**Part one — shipped.** The card's DATA has been ready since the
+measurement finished all along (`price_table.set_quantities()` in
+`_on_measured`); only its VISIBILITY moved. `self.price_box.setVisible
+(True)` no longer fires there — it now fires once a BOQ actually has
+text, in both places that can produce the first one: `_on_written` (the
+ordinary "Make my BOQ" path) and `_on_followed_up` (item 8's "Make with
+drawing" used as the very first action, before any BOQ exists). A
+write-up that comes back with nothing leaves the card hidden, same as
+before pricing could ever have existed. 2 new tests in
+`tests/test_boq_pricing.py` (shown once a real write-up lands; a write-up
+with nothing back leaves it hidden) + the one stale test from this
+card's original build renamed and corrected (it asserted the OLD
+"visible right after measuring" behaviour, which is exactly what this
+item reports as the problem). 116/116 across the full BOQ+BOM sweep. One
+real bug caught building the test: calling `_on_written` with real text
+reaches `_offer_followup()`, which opens a real `FollowupDialog` — had to
+patch it the same way every other BOQ test on this path already does, or
+the test hangs forever (CLAUDE.md: never exec()/a QEventLoop in a test).
+
+**Part two — the owner's clarification, and what it actually meant.**
+Asked to resolve the tension against `boq_price.py`'s "no number of
+record is ever produced by an AI, without exception" rule (option (a)/
+(b)/(c) above, as originally written). The owner's answer: "basically i
+want that BOQ in any format gets filled in with the number from the
+pricing list the user will attach, that's it" — option (b), and simpler
+than first described: no AI merge step at all. The numbers were always
+going to come from the user's own attached price list (the existing
+deterministic matcher, unchanged); the actual, narrower gap was that
+"any format" wasn't true yet — `write_boq_xlsx`/`_csv`/`_pdf` existed in
+`core/boq_price.py`, `write_boq_docx` did not, so Word was the one format
+the priced numbers could never reach. No Groq, no AI, no rule change
+needed — this was a missing writer, not a missing merge.
+
+What shipped:
+  - **`prism_terminal/core/boq_price.py`: `write_boq_docx(boq, path)`**,
+    fourth alongside the existing three. Reuses the SAME `Boq` model and
+    the SAME canonical Decimal methods the other writers call
+    (`subtotal()`/`contingency_amount()`/`pre_tax_total()`/
+    `gst_amount()`/`grand_total()`) — nothing here recomputes a total
+    independently, so Word can never disagree with Excel/CSV/PDF by a
+    paisa. The CGST/SGST split mirrors `boq_html()`'s own approach
+    exactly (SGST = `gst_amount() - cgst`, not computed separately, so
+    the two halves always sum to the exact total). A table per the same
+    `_COLS` header `write_boq_xlsx` uses, a merged section-header row
+    per section, a sub-total row per section, then the same roll-up
+    (sub-total → contingency → GST/IGST → grand total) and the same
+    amount-in-words line. Guarded by a new `HAVE_DOCX` flag, same
+    pattern as `HAVE_XLSX` — `python-docx` is already a project
+    dependency, used elsewhere in the engine. Word has no formula cells,
+    so unlike the xlsx sheet this is a flat, once-computed table — the
+    docstring says so plainly, and that editing a rate here does not
+    re-flow the totals the way Excel's live formulas do.
+  - **`addons/boq/pricing.py`**: a fourth export button, "Save as
+    Word…", next to Excel/CSV/PDF, wired through the same `export(kind,
+    path)` / `_export(kind)` methods every other format already uses —
+    no new code path, one new dict entry in each.
+  - 1 new test, `tests/test_boq_pricing.py::TheExportsWriteWhatTheGridShows
+    ::test_docx_has_the_same_grid_and_totals_as_every_other_format` —
+    opens the real .docx with `python-docx` and checks the matched rate,
+    the computed amount and the grand total are all actually in the
+    table, the same shape the existing `test_csv`/`test_xlsx_has_live
+    _formulas` tests already check for their own formats. `devtools/
+    extract_strings.py` run after: 2 new strings, none removed. 117/117
+    across the full BOQ+BOM sweep.
+  - Manually verified directly against `core/boq_price.py` before
+    wiring the UI: built a real priced `Boq`, wrote it, re-opened the
+    .docx with `python-docx` and confirmed the table, the matched rate,
+    and the GRAND TOTAL row all round-tripped correctly.
+
+## 11. Prism's own offline measurement was wrong — first real-client-file bug, and the process for the next one
+
+Noted 2026-10-22, from the owner, testing a real HVAC drawing end to end
+(`HVAC_BOQ_TEST`, outside this repo: `hvac_sample.dxf`). **Done
+(2026-10-22) — the bug, the fix, and the process for every future one.**
+
+**What the owner actually found:** made a BOQ the normal way (measured
+figures only, no drawing sent). Separately, out of curiosity, gave the
+real drawing directly to an AI and got a second BOQ. Compared the two —
+the AI's version was more accurate, and by a lot. Checked myself, directly
+against the real file (not by trusting either generated document): Prism's
+own offline measurement said the supply duct was **78.82 m**. It is
+actually **38.80 m** — confirmed independently. Opened the raw DXF entity
+by entity and found the exact cause: the duct is drawn as two parallel
+lines 800mm apart (completely normal, professional HVAC drafting
+practice), and `core.boq.measure()` was summing every line on the layer —
+both edges counted as if they were two separate ducts.
+
+**The uncomfortable part, said plainly:** the only reason the AI-written
+version was right is that the real drawing left Prism's offline, "no AI
+ever sees it" path. That is exactly the gap this fix closes — teaching
+the *offline* measurer the convention, so the drawing never has to leave
+the machine to get a correct number.
+
+**The owner's instruction, which sets how every future one of these gets
+handled:** don't call it "a suspicious layer" and stop there — that's not
+a real fix. Teach Prism's code the actual rule, write the rule down
+somewhere durable, and when a client brings more test files and more bugs
+turn up, work through the same loop every time: find it, understand the
+real drawing convention behind it, fix the measuring code itself, write
+the rule down, test it so it can't come back.
+
+**What shipped:**
+  - **`prism_terminal/core/boq.py`: `_collapse_duct_pairs()`.** Before
+    summing a layer's LINE lengths, looks for pairs that are roughly
+    parallel, roughly the same length, and a small constant perpendicular
+    distance apart (a run's own width) — treats a matched pair as ONE
+    run's two edges, not two, and drops the short stub that closes a
+    paired run's open end (not route length). Anything that doesn't match
+    is measured exactly as it always was — this only ever acts on a
+    genuine double-line pair, never an ordinary single-line run.
+  - **A visible note, not a silent correction** — `measure()`'s existing
+    `notes` list gets an entry naming the layer and how many pairs were
+    read this way, "verify before pricing." The inference is real and the
+    fix is real, but it is still an inference, not a raw measurement, and
+    the module's whole promise is that nothing here is silently trusted.
+  - **A real false positive caught and fixed before shipping, not after**
+    — the first version (offset < 0.6 × length) nearly read a 24 m × 14 m
+    room's opposite walls as one 24 m duct (ratio 0.58, close to every
+    real duct pair's own ratio). Tightened to 0.5, confirmed against both
+    the real duct geometry and a synthetic room, documented as the known
+    edge of the current rule, not quietly tuned away and forgotten.
+  - **`prism_terminal/core/HVAC_DRAWING_RULES.md`** (new) — the rule book
+    the owner asked for. Rule 1 is this bug, in full: the convention, what
+    broke, exactly what the fix does, and — importantly — what it does
+    NOT yet handle (LWPOLYLINE double-lines, two genuinely separate runs
+    accidentally sharing one layer, a tapering reducer's true centreline).
+    Above rule 1, a numbered **process** section: get the client's real
+    file and an independent ground truth, compare line by line, read the
+    raw DXF coordinates rather than guessing from the symptom, name the
+    general drawing CONVENTION responsible (not the one file), fix the
+    measuring code itself, write the rule down in this same shape, add a
+    synthetic regression test built from the real geometry (never the
+    client's actual file kept in the repo), and re-run every rule's tests
+    together before shipping the next one. `core/boq.py`'s own module
+    docstring now points here.
+  - 5 new tests, `tests/test_double_line_ducts.py`: a simple two-edge
+    duct; the real client geometry reconstructed synthetically (pinned to
+    within 100mm of the AI's own independent 38.80 m reading, nowhere
+    near the old 78.82 m); an ordinary single-line run, untouched; two
+    separate same-length parallel pipes on two different layers, both
+    kept at their own full length; and the room-walls false positive
+    that was caught and fixed, now locked in as a permanent regression
+    guard. 130/130 across the full BOQ+BOM+site-facts sweep.
+  - Checked which other add-ons this core-engine change could reach
+    before calling it safe: only `addons/boq/dialog.py` and `addons/boq/
+    measured.py` call `core.boq` at all — Gerber, STEP and every other
+    add-on measure through their own, separate engines, untouched.
+
+## 12. Item 7's real fix, and HVAC_DRAWING_RULES.md gated to HVAC requests only
+
+Noted 2026-10-22/23, from the owner. **Done.**
+
+### 12a. The real "opens a fresh tab" fix (item 7 was incomplete)
+
+The owner tested item 7 directly: "Make with drawing," then a follow-up
+on top of it, still opened a fresh browser tab — and the same thing
+happened following up after "Make my BOQ". Item 7's write-up had been
+marked "Done" without actually tracing where a browser tab comes from;
+it fixed Prism's own small progress popup, which was real, but not what
+"opens a new tab" meant.
+
+**What was actually wrong:** the engine already has a working mechanism
+for this — `resume_urls`, a `{stage: chat_url}` dict passed into
+`AutomationWorker`/`core.automation.run()` that makes it navigate back to
+an existing conversation instead of opening a fresh tab
+(`_open_agent_page` checks it before deciding whether to open a new one
+at all). `addons/step/dialog.py`'s own follow-up handler already uses it.
+`addons/boq/dialog.py` simply never called it on any follow-up.
+
+What shipped:
+  - **`addons/boq/dialog.py`**: `self._last_agent` / `self._last_link` —
+    who answered most recently, and that exact chat's own URL — updated
+    at the end of every completed stage (`_on_written` for the first
+    write-up, `_on_followed_up` for every follow-up/recheck after it, so
+    a third follow-up resumes the SECOND one's chat, not the very first).
+  - **`_fu_start_next`** builds `resume_urls = {self._fu_stage:
+    self._last_link} if tool == self._last_agent and self._last_link else
+    None` before constructing the `AutomationWorker`. Guarded on the SAME
+    agent answering again — a different agent, or a mid-chain fallback to
+    one, correctly resumes nothing (no chat of that other tool's exists),
+    the same check `addons/step/dialog.py`'s `_on_answer_followup` makes.
+  - Groq's branch is untouched — no browser page, so `self._last_link`
+    stays empty whenever Groq last answered, and resume never triggers
+    for it, with no special-casing needed.
+  - 6 new tests,
+    `tests/test_boq_dialog.py::AFollowUpResumesTheSameChatInsteadOfOpeningAFreshOne`.
+  - **Said plainly:** the first pass at item 7 was reported "Done" without
+    tracing the actual mechanism that opens a browser tab. This one is
+    verified against that real mechanism, not just against Prism's own
+    popup.
+
+### 12b. HVAC_DRAWING_RULES.md gated — only when the request says "HVAC"
+
+The owner's instruction, once item 11's fix was shipped: these rules are
+trade-specific, verified against real HVAC drawings specifically, and
+must never quietly start reading an electrical, plumbing or civil
+drawing's lines differently too just because the geometry happens to
+look similar. Going forward, more test folders will come in, each may
+surface its own bug, and each fix gets taught into the code and written
+into the rule book the same way rule 1 was (see HVAC_DRAWING_RULES.md's
+own process section) — but the rules only ever engage when the person's
+own request actually names HVAC. Nothing here is guessed from the
+drawing's layer names or file name.
+
+What shipped:
+  - **`prism_terminal/core/boq.py`**: `measure(dxf_path, hvac=False)` —
+    a new parameter. `_collapse_duct_pairs` (rule 1) only runs when
+    `hvac=True`; otherwise every layer is measured exactly as it was
+    before rule 1 ever existed — the plain sum, double-counted duct and
+    all. The module docstring and `HVAC_DRAWING_RULES.md` both say so.
+  - **`workers.py`**: `MeasureWorker` takes `hvac: bool = False` and
+    passes it straight through to `boq.measure`.
+  - **`addons/boq/dialog.py:_measure()`** decides `hvac` by checking
+    `"hvac" in self.ask.text().lower()` — the person's own request text,
+    read live off the ask box (not `self.request`, which isn't set until
+    "Make" is pressed, well after measuring already ran). Typing "HVAC"
+    anywhere in the request turns the rules on for that run; nothing
+    else does. **Known limitation, stated plainly:** if the drawing is
+    attached before "HVAC" is typed into the box, measuring has already
+    run without the flag — type HVAC into the request before or
+    alongside attaching the drawing.
+  - **The audit-trail gap from item 11 is also closed here**: rule 1's
+    own note (`q["notes"]`) was being computed but never actually shown
+    anywhere — `_on_measured` only ever read the DXF *converter's* notes
+    (a different list, `MeasureWorker.done`'s second value), never
+    `q.get("notes")`. Both are now joined into the same line the person
+    already sees under "Measured from your drawing" (`self.csv_label`),
+    and `write_quantities_csv` now appends each note as its own `note`
+    row in the exported CSV too, so it survives being emailed or filed
+    away, not only shown once in the live app.
+  - 7 new tests: `tests/test_double_line_ducts.py::
+    TheRuleOnlyAppliesWhenHvacIsAskedFor` (hvac=False keeps the old,
+    un-collapsed reading; hvac=True applies the rule) +
+    `tests/test_boq_dialog.py::TheHvacFlagComesOnlyFromTheAskBox` (the
+    word "HVAC" turns it on, case-insensitively; a different trade or no
+    text yet leaves it off). The existing double-line-duct tests were
+    updated to pass `hvac=True` explicitly, since they test the rule
+    itself and must still exercise it now that it is opt-in.
+  - Full BOQ+BOM+site-facts sweep green throughout (142 at last count);
+    full project suite + `PRISM_SELFTEST` run before this push.
+
+**Where to actually check this in the Prism UI, for the owner:**
+  1. Attach the drawing with "HVAC" somewhere in the request text box.
+  2. Once measured, open **"Measured from your drawing"** — the table
+     shows the corrected length per layer directly (e.g. the supply duct
+     reading ~38.3 m, not ~78.8 m).
+  3. Just below the table, the green **"Saved so you can check every
+     number →"** line now also shows the audit note when a rule fired —
+     "M-DUCT-SUPPLY: read N pair(s) of lines as one run's two edges... —
+     verify before pricing" — directly under that line, in amber/⚠ style.
+  4. The exported CSV at that same path (openable in Excel) has the same
+     numbers in rows, plus a `note` row for each one a rule touched.
+  5. To see the difference for yourself: leave "HVAC" out of the request
+     text for the same drawing and measure again — the duct layer reads
+     the old, doubled number instead, with no note — proving the gate
+     itself, not just the fix.

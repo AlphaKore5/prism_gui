@@ -168,11 +168,13 @@ class PricingTable(QWidget):
         self.xlsx_btn = C.button(i18n.t("Save as Excel…"), "primary",
                                  icon_name="file", small=True,
                                  on_click=lambda: self._export("xlsx"))
+        self.docx_btn = C.button(i18n.t("Save as Word…"), "secondary", small=True,
+                                 on_click=lambda: self._export("docx"))
         self.csv_btn = C.button(i18n.t("Save as CSV…"), "secondary", small=True,
                                 on_click=lambda: self._export("csv"))
         self.pdf_btn = C.button(i18n.t("Save as PDF…"), "secondary", small=True,
                                 on_click=lambda: self._export("pdf"))
-        for b in (self.xlsx_btn, self.csv_btn, self.pdf_btn):
+        for b in (self.xlsx_btn, self.docx_btn, self.csv_btn, self.pdf_btn):
             exports.addWidget(b)
         exports.addStretch(1)
         col.addLayout(exports)
@@ -353,10 +355,11 @@ class PricingTable(QWidget):
 
     # ── exports ──────────────────────────────────────────────────────────
     def export(self, kind: str, path: str) -> str:
-        """Write the priced BOQ to `path` as xlsx / csv / pdf. Raises the
-        engine's BoqError with a plain reason when it cannot."""
+        """Write the priced BOQ to `path` as xlsx / docx / csv / pdf. Raises
+        the engine's BoqError with a plain reason when it cannot."""
         boq = self.boq()
-        writer = {"xlsx": self._bp.write_boq_xlsx, "csv": self._bp.write_boq_csv,
+        writer = {"xlsx": self._bp.write_boq_xlsx, "docx": self._bp.write_boq_docx,
+                  "csv": self._bp.write_boq_csv,
                   "pdf": self._bp.write_boq_pdf}[kind]
         return writer(boq, path)
 
@@ -364,6 +367,7 @@ class PricingTable(QWidget):
         if self._boq is None:
             return
         filters = {"xlsx": i18n.t("Excel workbook (*.xlsx)"),
+                   "docx": i18n.t("Word document (*.docx)"),
                    "csv": i18n.t("CSV (*.csv)"),
                    "pdf": i18n.t("PDF (*.pdf)")}[kind]
         suggested = os.path.join(os.path.expanduser("~/Downloads"),

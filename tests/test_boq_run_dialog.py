@@ -93,5 +93,52 @@ class BoqRunDialogBuildsAndTransitions(unittest.TestCase):
         self.assertEqual(seen, [])
 
 
+class RestartReusesTheWindowForTheNextJob(unittest.TestCase):
+    """addons/boq/dialog.py now keeps ONE BoqRunDialog for a whole BOQ
+    session and calls restart() for the next verify/follow-up instead of
+    building a second window -- the owner's own report was "Verify and
+    remake" opening a brand new one even right after an ordinary
+    follow-up. restart() must undo a prior finish_*() lock and swap in a
+    card for the new stage/agent, the same as a fresh construction would,
+    since the person watching cannot otherwise tell the two apart."""
+
+    def test_restart_after_finish_ok_reopens_the_controls_and_relocks_close(self):
+        dlg = BoqRunDialog("x", "followup", "ChatGPT")
+        dlg.finish_ok(["done"], "")
+        self.assertTrue(dlg.close_btn.isEnabled())
+        dlg.restart("Verifying against the drawing", "recheck", "Claude")
+        self.assertTrue(dlg.skip_btn.isEnabled())
+        self.assertTrue(dlg.fallback_btn.isEnabled())
+        self.assertTrue(dlg.stop_btn.isEnabled())
+        self.assertFalse(dlg.close_btn.isEnabled())
+
+    def test_restart_swaps_in_a_fresh_card_for_the_new_stage_and_agent(self):
+        dlg = BoqRunDialog("Carrying your follow-up on", "followup", "ChatGPT")
+        dlg.finish_ok(["done"], "")
+        dlg.restart("Verifying against the drawing", "recheck", "Claude")
+        self.assertEqual(dlg.card.agent, "Claude")
+        self.assertEqual(dlg.card.state(), "running")
+        self.assertEqual(dlg._head.text(), "Verifying against the drawing")
+
+    def test_restart_does_not_carry_over_the_previous_jobs_note(self):
+        """A plain follow-up carries no duration note; a recheck right
+        after one must show its own 20-minute note, not inherit silence
+        (or an older note) from the job before it."""
+        dlg = BoqRunDialog("x", "followup", "ChatGPT")
+        dlg.restart("Verifying against the drawing", "recheck", "Claude",
+                    note="Claude is reading the drawing itself — up to 20 minutes.")
+        self.assertIn("20 minutes", dlg.card.note.text())
+
+    def test_restart_can_finish_again_afterwards(self):
+        """The reused window must behave exactly like a fresh one for the
+        rest of its life -- finish_ok() after a restart() still locks it."""
+        dlg = BoqRunDialog("x", "followup", "ChatGPT")
+        dlg.finish_ok(["first answer"], "")
+        dlg.restart("x", "recheck", "Claude")
+        dlg.finish_ok(["second answer"], "")
+        self.assertEqual(dlg.card.state(), "completed")
+        self.assertTrue(dlg.close_btn.isEnabled())
+
+
 if __name__ == "__main__":
     unittest.main()

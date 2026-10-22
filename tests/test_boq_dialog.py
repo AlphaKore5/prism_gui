@@ -71,28 +71,46 @@ class _FakeSignal:
 
 
 class _FakeRunDialog:
-    """Stands in for addons.boq.run_dialog.BoqRunDialog. Its exec() returns
+    """Stands in for addons.boq.run_dialog.BoqRunDialog. show() returns
     immediately instead of opening a real modal -- a real one would block
     forever in a test, since the mocked AutomationWorker below never fires
     a signal to end it (CLAUDE.md: never call exec()/a QEventLoop in a
     test). Every BOQ test that reaches _send_followup for a browser agent
     (not Groq) must patch "addons.boq.run_dialog.BoqRunDialog" with this,
-    the same way existing tests already patch FollowupDialog."""
+    the same way existing tests already patch FollowupDialog.
+
+    BoqDialog now keeps ONE of these for its whole session and calls
+    restart() on later verify/follow-up calls instead of constructing a
+    second one -- restart_calls and the constructor's own count (below)
+    let a test tell which happened."""
 
     last = None
+    construct_calls = 0
 
     def __init__(self, title, stage, agent, parent=None, note=""):
         self.title, self.stage, self.agent = title, stage, agent
         self.note = note
-        self.exec_calls = 0
+        self.show_calls = 0
+        self.restart_calls = 0
+        _FakeRunDialog.construct_calls += 1
         _FakeRunDialog.last = self
         self.skip_requested = _FakeSignal()
         self.fallback_requested = _FakeSignal()
         self.stop_requested = _FakeSignal()
 
-    def exec(self):
-        self.exec_calls += 1
-        return 0
+    def show(self):
+        self.show_calls += 1
+
+    def raise_(self):
+        pass
+
+    def activateWindow(self):
+        pass
+
+    def restart(self, title, stage, agent, note=""):
+        self.title, self.stage, self.agent = title, stage, agent
+        self.note = note
+        self.restart_calls += 1
 
     def set_agent(self, agent):
         self.agent = agent
@@ -276,12 +294,24 @@ class TheDrawingGoesToAIOnlyAfterAYes(unittest.TestCase):
                                   staticmethod(lambda *a, **k: answer)):
             self.d._ask_recheck()
 
-    def test_the_button_is_off_until_there_is_an_answer_and_a_drawing(self):
+    def test_the_button_is_off_without_a_drawing_on_regardless_of_an_answer(self):
+        """A drawing alone is enough now -- no existing BOQ required. The
+        button covers both "make one from the drawing" (no answer yet)
+        and "verify/remake" (one already exists)."""
         self.d._set_busy(False, "")
         self.assertTrue(self.d.recheck_btn.isEnabled())
         self.d.cad_path = ""
         self.d._set_busy(False, "")
         self.assertFalse(self.d.recheck_btn.isEnabled())
+
+    def test_the_button_is_on_even_with_no_answer_yet(self):
+        self.d.cad_path = self._drawing
+        self.d.result.setPlainText("")
+        self.d._set_busy(False, "")
+        self.assertTrue(self.d.recheck_btn.isEnabled())
+
+    def test_the_button_says_make_with_drawing(self):
+        self.assertEqual(self.d.recheck_btn.text(), "Make with drawing")
 
     def test_saying_no_sends_nothing(self):
         from addons.boq import dialog as BD
@@ -299,6 +329,30 @@ class TheDrawingGoesToAIOnlyAfterAYes(unittest.TestCase):
         prompt = stage[2][0]
         self.assertIn("WALLS 12.00 m", prompt)
         self.assertIn("Brick wall", prompt)
+
+    def test_with_no_previous_answer_it_makes_from_the_drawing_instead_of_verifying(self):
+        """"Make with drawing" pressed before any BOQ exists -- nothing to
+        verify yet, so it should read as making one, not correcting one."""
+        from addons.boq import dialog as BD
+        self.d.result.setPlainText("")
+        self._ask(BD.QMessageBox.Yes)
+        stage = self._Capture.seen["kwargs"]["custom_stages"][0]
+        prompt = stage[2][0]
+        self.assertNotIn("PREVIOUS ANSWER", prompt)
+        self.assertIn("reading the attached drawing directly", prompt)
+        self.assertEqual(_FakeRunDialog.last.title,
+                         "Making your BOQ from the drawing")
+
+    def test_with_a_previous_answer_it_still_verifies_and_remakes(self):
+        """The same button, pressed once a BOQ already exists -- unchanged
+        from before this session's change."""
+        from addons.boq import dialog as BD
+        self._ask(BD.QMessageBox.Yes)   # setUp already gave self.d an answer
+        stage = self._Capture.seen["kwargs"]["custom_stages"][0]
+        prompt = stage[2][0]
+        self.assertIn("PREVIOUS ANSWER", prompt)
+        self.assertIn("Verify and remake", prompt)
+        self.assertEqual(_FakeRunDialog.last.title, "Verifying against the drawing")
 
     def test_the_corrected_answer_replaces_the_first_one_in_the_same_box(self):
         from unittest import mock
@@ -823,6 +877,112 @@ class TheFollowUpFlowHasALiveWindowAndAFallbackChain(unittest.TestCase):
                             "stale answer from ChatGPT")
 
 
+class AFollowUpResumesTheSameChatInsteadOfOpeningAFreshOne(unittest.TestCase):
+    """The owner's report, after item 7 shipped: BOTH "Make with drawing"
+    and "Make my BOQ" still opened a brand new browser tab/chat for every
+    follow-up, because item 7 only fixed Prism's OWN small progress
+    window -- it never touched the separate question of which browser tab
+    the engine itself opens for a stage. The real mechanism was already
+    built and already used by addons/step/dialog.py's identical follow-up
+    case (AutomationWorker's own resume_urls/core.automation's
+    resume_urls, keyed by stage, matched against driver.current_url saved
+    from the agent's last reply) -- BOQ's dialog.py simply never called
+    it."""
+
+    def setUp(self):
+        from unittest import mock
+        _TrackedWorker.instances = []
+        self.d = _dialog()
+        self.d.summary = "WALLS 12.00 m"
+        self.d.request = "BOQ for the site"
+        self.d._task_name = "BOQ — sai"
+        self.d.result.setPlainText("1  Brick wall  12.00  m")
+        self._patches = [
+            mock.patch("addons.boq.dialog.AutomationWorker", _TrackedWorker),
+            mock.patch("addons.boq.run_dialog.BoqRunDialog", _FakeRunDialog),
+        ]
+        for p in self._patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self._patches])
+
+    def _followup(self, agent="ChatGPT"):
+        self.d.writer_combo.setCurrentText(agent)
+        self.d._send_followup("add a gate", [], verify=False)
+
+    def _write_up(self, agent="ChatGPT", link="https://chatgpt.com/c/abc"):
+        """A completed first write-up. texts is non-empty, so _on_written
+        ends by opening the follow-up offer -- a real FollowupDialog.exec()
+        would hang here forever (CLAUDE.md: never exec()/a QEventLoop in a
+        test), so this is always wrapped, the same way every other BOQ
+        test that reaches this path already is."""
+        from unittest import mock
+        self.d.writer_agent = agent
+        with mock.patch("dialogs.followup_dialog.FollowupDialog") as fake:
+            fake.return_value.submitted.return_value = False
+            self.d._on_written({"format": ["1  Brick wall  12.00  m"]},
+                               {"format": link} if link else {})
+
+    def test_a_first_write_up_leaves_its_own_chat_resumable(self):
+        self._write_up(link="")
+        self.assertEqual(self.d._last_agent, "ChatGPT")
+        self.assertEqual(self.d._last_link, "")  # none given in this test
+
+    def test_a_followup_by_the_same_agent_resumes_the_write_ups_chat(self):
+        self._write_up()
+        self._followup("ChatGPT")
+        kw = _TrackedWorker.instances[0].kwargs
+        self.assertEqual(kw["resume_urls"], {"followup": "https://chatgpt.com/c/abc"})
+
+    def test_switching_agents_for_the_followup_does_not_resume_anything(self):
+        """There is no chat of Claude's to resume if ChatGPT wrote the
+        BOQ -- must fall back to the existing full-context prompt, never
+        guess at a URL that belongs to a different tool."""
+        self._write_up()
+        self._followup("Claude")
+        kw = _TrackedWorker.instances[0].kwargs
+        self.assertIsNone(kw["resume_urls"])
+
+    def test_a_second_followup_resumes_the_first_followups_chat_not_the_write_ups(self):
+        from unittest import mock
+        self._write_up()
+        self._followup("ChatGPT")
+        with mock.patch("dialogs.followup_dialog.FollowupDialog") as fake:
+            fake.return_value.submitted.return_value = False
+            _TrackedWorker.instances[0].done.emit(
+                {"followup": ["1  Brick wall  12.00  m, gate added"]},
+                {"followup": "https://chatgpt.com/c/second"})
+        self._followup("ChatGPT")
+        kw = _TrackedWorker.instances[1].kwargs
+        self.assertEqual(kw["resume_urls"],
+                         {"followup": "https://chatgpt.com/c/second"})
+
+    def test_make_with_drawing_as_the_very_first_action_resumes_nothing(self):
+        """No BOQ exists yet, so there is nothing to resume -- confirmed
+        by construction (self._last_agent/_last_link start empty), not a
+        special case."""
+        from unittest import mock
+        self.assertEqual(self.d._last_agent, "")
+        self.assertEqual(self.d._last_link, "")
+        self.d.cad_path = os.path.join(tempfile.mkdtemp(), "sai.dxf")
+        with open(self.d.cad_path, "w") as fh:
+            fh.write("0\nEOF\n")
+        with mock.patch.object(self.d, "_drawing_consent", return_value=True):
+            self.d.writer_combo.setCurrentText("ChatGPT")
+            self.d._ask_recheck()
+        kw = _TrackedWorker.instances[0].kwargs
+        self.assertIsNone(kw["resume_urls"])
+
+    def test_a_fallback_to_a_different_tool_mid_chain_never_resumes_either(self):
+        self._write_up()
+        self._followup("ChatGPT")
+        self.assertEqual(_TrackedWorker.instances[0].kwargs["resume_urls"],
+                         {"followup": "https://chatgpt.com/c/abc"})
+        _TrackedWorker.instances[0].failed.emit("ChatGPT ran out of memory")
+        # the chain's next agent is Claude (see agents.py:FALLBACK_ORDER) --
+        # no chat of Claude's exists to resume
+        self.assertIsNone(_TrackedWorker.instances[1].kwargs["resume_urls"])
+
+
 class AFollowUpOrVerifyActuallyProducesAndSurfacesAFile(unittest.TestCase):
     """Items 4-6 from BOQ-CHANGES-TODO.md, 2026-10-21: a follow-up's new
     file never replaced the stale measured CSV the follow-up window kept
@@ -950,6 +1110,117 @@ class AFollowUpOrVerifyActuallyProducesAndSurfacesAFile(unittest.TestCase):
                          ["/x/boq_quantities_1.csv"])
 
 
+class AttachingASampleTemplateIsDiscoverableAndConfirmed(unittest.TestCase):
+    """The owner's ask: "option for the user to just give in the sample
+    BOQs/template... as reference... without actually giving the drawing
+    file to the AIs." The underlying mechanism already worked --
+    core.boq.classify_inputs has always sorted an attached .docx/.pdf/etc.
+    into its own "templates" role, described to the writer as "an example
+    BOQ showing the firm's usual style", separate from the drawing itself.
+    Nothing told the user this was even possible; this is purely the
+    discoverability fix, not a new engine capability."""
+
+    def setUp(self):
+        self.d = _dialog()
+
+    def _attach(self, name="firm_format.docx"):
+        from unittest import mock
+        from addons.boq import dialog as BD
+        record = {"path": f"/x/{name}", "name": name}
+        with mock.patch.object(BD.CB.files, "attach", return_value=record):
+            self.d._absorb([record["path"]])
+
+    def test_the_hint_invites_a_sample_before_anything_is_attached(self):
+        self.assertIn("sample BOQ", self.d.template_hint.text())
+        self.assertIn("Make with drawing", self.d.template_hint.text())
+
+    def test_attaching_one_confirms_it_with_a_count(self):
+        self._attach()
+        self.assertIn("1 sample template attached", self.d.template_hint.text())
+        self.assertIn("Make with drawing", self.d.template_hint.text())
+
+    def test_attaching_a_second_one_updates_the_count_and_pluralises(self):
+        self._attach("firm_format.docx")
+        self._attach("another_sample.pdf")
+        self.assertIn("2 sample templates attached", self.d.template_hint.text())
+
+    def test_a_plain_note_file_does_not_touch_the_hint(self):
+        """A .txt classifies as "notes", not "templates" -- the hint must
+        stay the standing invitation, not claim one was attached."""
+        self._attach(name="requirements.txt")
+        self.assertIn("You can also attach", self.d.template_hint.text())
+
+
+class TheLiveWindowIsReusedAcrossFollowUps(unittest.TestCase):
+    """The owner's report: "Verify and remake" opened a brand new window
+    instead of continuing in the one the BOQ was already shown in, even
+    right after an ordinary follow-up in the same session. One
+    BoqRunDialog is now kept for the whole BOQ session and restart() into
+    the next job, instead of a second window -- the same way
+    main_window.py keeps one OutputPanel for the core Run screen rather
+    than one per stage."""
+
+    def setUp(self):
+        from unittest import mock
+        _TrackedWorker.instances = []
+        _FakeRunDialog.construct_calls = 0
+        self.d = _dialog()
+        self.d.summary = "WALLS 12.00 m"
+        self.d.request = "BOQ for the site"
+        self.d._task_name = "BOQ — sai"
+        self.d.cad_path = os.path.join(tempfile.mkdtemp(), "sai.dxf")
+        with open(self.d.cad_path, "w") as fh:
+            fh.write("0\nEOF\n")
+        self.d.result.setPlainText("1  Brick wall  12.00  m")
+        self._patches = [
+            mock.patch("addons.boq.dialog.AutomationWorker", _TrackedWorker),
+            mock.patch("addons.boq.run_dialog.BoqRunDialog", _FakeRunDialog),
+        ]
+        for p in self._patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self._patches])
+
+    def _followup(self, text="add a gate"):
+        self.d.writer_combo.setCurrentText("ChatGPT")
+        self.d._send_followup(text, [], verify=False)
+
+    def _recheck(self):
+        from unittest import mock
+        self.d.writer_combo.setCurrentText("ChatGPT")
+        with mock.patch.object(self.d, "_drawing_consent", return_value=True):
+            self.d._ask_recheck()
+
+    def test_verify_and_remake_after_a_followup_reuses_the_same_window(self):
+        self._followup()
+        self.assertEqual(_FakeRunDialog.construct_calls, 1)
+        first_window = _FakeRunDialog.last
+        self._recheck()
+        self.assertEqual(
+            _FakeRunDialog.construct_calls, 1,
+            "a second BoqRunDialog was built instead of reusing the first")
+        self.assertIs(_FakeRunDialog.last, first_window)
+        self.assertEqual(first_window.restart_calls, 1)
+        self.assertEqual(first_window.stage, "recheck")
+
+    def test_a_third_call_restarts_again_without_building_another_window(self):
+        self._followup()
+        self._recheck()
+        self._followup("one more change")
+        self.assertEqual(_FakeRunDialog.construct_calls, 1)
+        self.assertEqual(_FakeRunDialog.last.restart_calls, 2)
+        self.assertEqual(_FakeRunDialog.last.stage, "followup")
+
+    def test_the_window_is_shown_not_exec_d_so_it_never_blocks_in_a_test(self):
+        """CLAUDE.md: never call exec()/a QEventLoop in a test. The real
+        BoqRunDialog is shown with show(), not the modal exec() the old
+        code used -- setModal(True) in its own __init__ already keeps the
+        BOQ dialog from being clicked underneath it."""
+        self._followup()
+        self.assertEqual(_FakeRunDialog.last.show_calls, 1)
+        self._recheck()
+        self.assertEqual(_FakeRunDialog.last.show_calls, 2)
+
+
 class ASampleBoqDefinesTheDeliverable(unittest.TestCase):
     """Attach one of the firm's own BOQs and the writer is told to make THAT
     document, filled with this drawing's numbers -- the drawing itself
@@ -1048,3 +1319,49 @@ class TheMeasurementIsATable(unittest.TestCase):
         self.assertEqual(len(d.meas_table.rows()), 5)
         self.assertIn("LENGTHS BY LAYER", d.summary)     # the AI's text, intact
         self.assertTrue(d.meas_box.isVisibleTo(d))
+
+
+class TheHvacFlagComesOnlyFromTheAskBox(unittest.TestCase):
+    """HVAC_DRAWING_RULES.md's rules are trade-specific -- the owner's own
+    instruction, 22 Oct 2026: apply them only when the person's own
+    request actually says "HVAC", never by default, and never guessed
+    from the drawing itself. _measure() is the one place this is decided,
+    reading self.ask.text() (available the moment a drawing is attached,
+    unlike self.request, which isn't set until "Make" is pressed)."""
+
+    class _Capture:
+        seen: dict = {}
+
+        def __init__(self, *a, **kw):
+            TheHvacFlagComesOnlyFromTheAskBox._Capture.seen = kw
+            self.done = self.failed = self
+
+        def connect(self, *_):
+            pass
+
+        def start(self):
+            pass
+
+    def _measure_with(self, text: str) -> bool:
+        from unittest import mock
+        from addons.boq import dialog as BD
+        d = _dialog()
+        d.ask.set_text(text)
+        d.cad_path = os.path.join(tempfile.mkdtemp(), "sai.dxf")
+        with open(d.cad_path, "w") as fh:
+            fh.write("0\nEOF\n")
+        with mock.patch.object(BD, "MeasureWorker", self._Capture):
+            d._measure()
+        return self._Capture.seen.get("hvac")
+
+    def test_the_word_hvac_turns_it_on(self):
+        self.assertTrue(self._measure_with("BOQ for HVAC ductwork"))
+
+    def test_hvac_is_not_case_sensitive(self):
+        self.assertTrue(self._measure_with("boq for the Hvac layout"))
+
+    def test_a_different_trade_leaves_it_off(self):
+        self.assertFalse(self._measure_with("BOQ for the electrical layout"))
+
+    def test_no_request_text_yet_leaves_it_off(self):
+        self.assertFalse(self._measure_with(""))
